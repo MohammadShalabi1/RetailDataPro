@@ -15,9 +15,17 @@ from datetime import date
 
 
 class FakeProvider(AIProvider):
-    def __init__(self, text_response: str = "Hello from the assistant.", fail_text: bool = False) -> None:
+    def __init__(
+        self,
+        text_response: str = "Hello from the assistant.",
+        structured_answer: GroundedAnswer | None = None,
+        fail_text: bool = False,
+        fail_structured: bool = False,
+    ) -> None:
         self.text_response = text_response
+        self.structured_answer = structured_answer or GroundedAnswer(answer="Grounded retail answer.", citations=[], confidence=0.74)
         self.fail_text = fail_text
+        self.fail_structured = fail_structured
         self.text_calls: list[TextGenerationRequest] = []
         self.structured_calls: list[StructuredGenerationRequest] = []
 
@@ -36,8 +44,10 @@ class FakeProvider(AIProvider):
 
     async def generate_structured(self, request: StructuredGenerationRequest) -> AIResponse:
         self.structured_calls.append(request)
+        if self.fail_structured:
+            raise AIProviderResponseError("provider failed")
         return AIResponse(
-            content=GroundedAnswer(answer="Grounded retail answer.", citations=[], confidence=0.74),
+            content=self.structured_answer,
             model=request.model or "fake-model",
             provider="fake",
             latency_ms=7,
@@ -67,6 +77,66 @@ class FakeAnalyticsService:
             order_count=10,
             average_order_value_cents=5_000,
         )
+
+    def get_supplier_performance(self, start_date=None, end_date=None, limit=5):
+        return {
+            "start_date": str(start_date or date(2026, 8, 1)),
+            "end_date": str(end_date or date(2026, 8, 31)),
+            "items": [
+                {
+                    "supplier_name": "NorthStar Home & Living",
+                    "revenue_cents": 120000,
+                    "units_sold": 80,
+                    "product_count": 4,
+                }
+            ],
+        }
+
+    def get_category_performance(self, start_date=None, end_date=None, limit=5):
+        return {
+            "start_date": str(start_date or date(2026, 8, 1)),
+            "end_date": str(end_date or date(2026, 8, 31)),
+            "items": [
+                {
+                    "category_name": "Household",
+                    "revenue_cents": 80000,
+                    "units_sold": 30,
+                    "gross_margin_cents": 12000,
+                }
+            ],
+        }
+
+
+class FakeDocumentService:
+    def __init__(self) -> None:
+        self.scopes: list[list[str]] = []
+
+    def search_documents(self, query: str, limit: int = 5, source_ids=None):
+        self.scopes.append(source_ids or [])
+
+        class Response:
+            def __init__(self) -> None:
+                self.query = query
+                self.source_ids = source_ids or []
+                self.results = [Result()]
+
+        class Result:
+            def model_dump(self, mode: str = "json"):
+                return {
+                    "source_id": "src_1",
+                    "chunk_id": "chk_1",
+                    "title": "Supplier report",
+                    "chunk_index": 0,
+                    "content": (
+                        "RetailData-Pro | Supplier Performance | August 2026 Page 1 "
+                        "NorthStar Home & Living had 84.3% fulfillment reliability. "
+                        "Affected products included paper towels, trash bags, aluminum foil, and detergent. "
+                        "Recommendation: split replenishment across backup suppliers and increase selective safety stock."
+                    ),
+                    "score": 0.91,
+                }
+
+        return Response()
 
 
 def test_run_turn_records_stages_in_order_for_conversation() -> None:
@@ -156,9 +226,40 @@ def test_future_tool_route_stops_when_required_evidence_is_missing() -> None:
     result = _run(dependencies, "What does the supplier report say?")
 
     assert "not have enough verified evidence" in result.answer
-    assert result.tool_results[0].status == ToolStatus.unavailable
+    assert result.tool_results[0].status == ToolStatus.success
+    assert result.tool_results[0].output["chunks"] == []
     assert provider.text_calls == []
-    assert result.limitations == ["Missing required evidence from: document_search"]
+    assert result.limitations == [
+        "Document evidence was unavailable.",
+        "Missing required evidence from: document_search",
+    ]
+
+
+def test_document_route_with_matching_chunks_generates_grounded_answer() -> None:
+    provider = FakeProvider()
+    document_service = FakeDocumentService()
+    dependencies = _dependencies(
+        provider,
+        _route(RouteCategory.document_search, RouteReason.document_reference),
+        document_service=document_service,
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        run_turn(
+            AgentTurnRequest(question="What does the supplier report say?", document_source_ids=["src_1"]),
+            dependencies,
+        )
+    )
+
+    assert result.tool_results[0].status == ToolStatus.success
+    assert result.tool_results[0].output["chunks"][0]["title"] == "Supplier report"
+    assert document_service.scopes == [["src_1"]]
+    assert result.answer == "Grounded retail answer."
+    assert len(provider.structured_calls) == 1
+    assert "retrieved_chunks" in provider.structured_calls[0].prompt
+    assert "NorthStar Home & Living had 84.3% fulfillment reliability" in provider.structured_calls[0].prompt
 
 
 def test_retail_analytics_route_executes_gateway_tool() -> None:
@@ -222,6 +323,179 @@ def test_multi_source_plan_is_stored_in_trace() -> None:
     assert plan_event["steps"][0]["tool_name"] == "analytics_summary"
 
 
+def test_successful_multi_source_synthesis_uses_both_tool_results() -> None:
+    provider = FakeProvider(
+        structured_answer=GroundedAnswer(
+            answer=(
+                "Household performance was weak in August, and the supplier report identifies "
+                "NorthStar Home & Living fulfillment reliability issues affecting paper towels."
+            ),
+            citations=[{"source_id": "src_1", "chunk_id": "chk_1", "claim": "NorthStar affected paper towels."}],
+            confidence=0.86,
+        )
+    )
+    dependencies = _dependencies(
+        provider,
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=FakeAnalyticsService(),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(dependencies, "Which categories were weak, and do supplier issues explain them?")
+
+    assert "NorthStar Home & Living" in result.answer
+    assert "paper towels" in result.answer
+    assert "Route `multi_source` completed" not in result.answer
+    assert "returned `supplier_performance` data" not in result.answer
+    assert len(provider.structured_calls) == 1
+    prompt = provider.structured_calls[0].prompt
+    assert "Which categories were weak" in prompt
+    assert "analytics_summary" in prompt
+    assert "NorthStar Home & Living had 84.3% fulfillment reliability" in prompt
+
+
+def test_multi_source_provider_failure_does_not_expose_tool_status_summary() -> None:
+    dependencies = _dependencies(
+        FakeProvider(fail_structured=True),
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=FakeAnalyticsService(),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(dependencies, "Compare supplier performance with the report.")
+
+    assert "Using" in result.answer
+    assert "NorthStar Home & Living" in result.answer
+    assert "Route `multi_source` completed" not in result.answer
+    assert "returned `" not in result.answer
+    assert "Retail database evidence from" not in result.answer
+    assert "Supplier report evidence:" not in result.answer
+    assert "Grounded answer generation failed" in result.limitations[-1]
+
+
+def test_multi_source_partial_success_keeps_supported_analytics_evidence() -> None:
+    provider = FakeProvider(
+        structured_answer=GroundedAnswer(
+            answer="Supplier performance data is available, but document evidence was unavailable.",
+            citations=[{"source_id": "analytics_summary", "claim": "Supplier data came from analytics."}],
+            confidence=0.7,
+        )
+    )
+    dependencies = _dependencies(
+        provider,
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=FakeAnalyticsService(),
+    )
+
+    result = _run(dependencies, "Compare supplier performance with the supplier report.")
+
+    assert result.answer.startswith("Supplier performance data is available")
+    assert "Document evidence was unavailable." in result.limitations
+    assert "Missing required evidence from: document_search" in result.limitations
+    assert "analytics_summary" in provider.structured_calls[0].prompt
+
+
+def test_multi_source_reverse_partial_success_keeps_supported_document_evidence() -> None:
+    provider = FakeProvider(
+        structured_answer=GroundedAnswer(
+            answer="The supplier report mentions delivery risk, but database analytics were unavailable.",
+            citations=[{"source_id": "src_1", "chunk_id": "chk_1", "claim": "Delivery risk came from the document."}],
+            confidence=0.68,
+        )
+    )
+    dependencies = _dependencies(
+        provider,
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(dependencies, "Compare supplier performance with the supplier report.")
+
+    assert result.answer.startswith("The supplier report mentions delivery risk")
+    assert "Missing required evidence from: analytics_summary" in result.limitations
+    assert "NorthStar Home & Living had 84.3% fulfillment reliability" in provider.structured_calls[0].prompt
+
+
+def test_multi_source_all_tools_fail_returns_safe_insufficient_evidence() -> None:
+    dependencies = _dependencies(FakeProvider(), _route(RouteCategory.multi_source, RouteReason.mixed_sources))
+
+    result = _run(dependencies, "Compare supplier performance with the supplier report.")
+
+    assert "not have enough verified evidence" in result.answer
+    assert result.limitations == [
+        "Document evidence was unavailable.",
+        "Missing required evidence from: analytics_summary, document_search",
+    ]
+
+
+def test_multi_source_trace_keeps_internal_tool_metadata_out_of_answer() -> None:
+    dependencies = _dependencies(
+        FakeProvider(fail_structured=True),
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=FakeAnalyticsService(),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(dependencies, "Compare supplier performance with the supplier report.")
+
+    assert any(event.get("stage") == "tool_gateway" and event.get("tool_name") == "analytics_summary" for event in result.trace.events)
+    assert "analytics_summary returned" not in result.answer
+
+
+def test_multi_source_provider_failure_for_category_question_returns_evidence_summary() -> None:
+    dependencies = _dependencies(
+        FakeProvider(fail_structured=True),
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=FakeAnalyticsService(),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(
+        dependencies,
+        "Which product categories had the weakest sales performance in August 2026, and do supplier issues explain those results?",
+    )
+
+    assert "Household" in result.answer
+    assert "NorthStar Home & Living" in result.answer
+    assert "I gathered verified evidence for this question" not in result.answer
+    assert "Retail database evidence from" not in result.answer
+    assert "Supplier report evidence:" not in result.answer
+    assert "RetailData-Pro | Supplier Performance | August 2026 Page" not in result.answer
+    assert "ranked from lowest to highest" in result.answer
+    assert "consistent with weaker performance" in result.answer
+    assert "correlation rather than proving causation" in result.answer
+    assert "caused" not in result.answer.lower()
+
+
+def test_multi_source_provider_failure_reports_no_forced_supplier_match() -> None:
+    class BeautyAnalyticsService(FakeAnalyticsService):
+        def get_category_performance(self, start_date=None, end_date=None, limit=5):
+            return {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-31",
+                "items": [
+                    {
+                        "category_name": "Beauty",
+                        "revenue_cents": 50000,
+                        "units_sold": 20,
+                        "gross_margin_cents": 12000,
+                    }
+                ],
+            }
+
+    dependencies = _dependencies(
+        FakeProvider(fail_structured=True),
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+        analytics_service=BeautyAnalyticsService(),
+        document_service=FakeDocumentService(),
+    )
+
+    result = _run(dependencies, "Which product categories were weakest, and do supplier issues explain them?")
+
+    assert "Beauty" in result.answer
+    assert "no supplier-report evidence directly linking" in result.answer
+
+
 def test_gateway_tool_events_occur_before_answer_generation() -> None:
     dependencies = _dependencies(FakeProvider(), _route(RouteCategory.document_search, RouteReason.document_reference))
 
@@ -230,12 +504,13 @@ def test_gateway_tool_events_occur_before_answer_generation() -> None:
     assert result.trace.stages.index("tool_gateway") < result.trace.stages.index("generate_answer")
 
 
-def _dependencies(provider: FakeProvider, route: ModelRoute, analytics_service=None) -> AgentDependencies:
+def _dependencies(provider: FakeProvider, route: ModelRoute, analytics_service=None, document_service=None) -> AgentDependencies:
     return AgentDependencies(
         ai_provider=provider,
         typed_router=FakeTypedRouter(route),
         model_router=ModelRouter(settings=_settings()),
         analytics_service=analytics_service,
+        document_service=document_service,
     )
 
 

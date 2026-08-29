@@ -167,7 +167,31 @@ document_search
 website_search
 ```
 
-Only `analytics_summary` is executable today. SQL, document, and website tools are registered but return safe unavailable results until their dedicated phases are implemented.
+`analytics_summary` and `document_search` are executable today. `retail_sql` and `website_search` are registered but return safe unavailable results until their dedicated phases are implemented.
+
+## Document Evidence
+
+Paste a report or document into the frontend document panel, or drag a file such as `.pdf`, `.txt`, `.md`, `.csv`, or `.json` into the upload box. You can also add document text through the backend before asking document-grounded questions:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/documents -ContentType "application/json" -Body '{"title":"Supplier report","content":"Supplier lead times improved in August. Margin pressure remains moderate."}'
+```
+
+Search uploaded document chunks directly:
+
+```powershell
+Invoke-RestMethod "http://localhost:8000/api/documents/search?q=supplier%20lead%20times&limit=5"
+```
+
+Then ask chat a document question:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/chat -ContentType "application/json" -Body '{"question":"What does the supplier report say about lead times?"}'
+```
+
+If no matching chunks are found, the agent returns a safe limitation instead of fabricating evidence.
+
+PDF upload is parsed on the backend, converted to text chunks, and stored in the same `sources` / `source_chunks` tables as pasted text.
 
 ## Safe Text-to-SQL and Grounding Internals
 
@@ -180,3 +204,36 @@ schema linking -> structured SQL generation -> AST guard -> optional read-only e
 Generated SQL is validated with a parser before execution, limited to one PostgreSQL `SELECT`, approved tables/schemas, safe functions, and a bounded row limit. Configure `READONLY_DATABASE_URL` separately from `DATABASE_URL` before enabling any live SQL execution path.
 
 Hybrid retrieval uses PostgreSQL `pgvector` plus full-text search on `source_chunks`, then combines dense and lexical candidates with reciprocal rank fusion. Reranking, context budgeting, bounded memory, semantic cache identity, and grounded answer schemas are implemented as internal modules for later orchestration phases.
+
+## AI Admin APIs
+
+Development/admin endpoints are available for the AI trace and evaluation dashboards:
+
+```text
+GET  /api/observability/traces
+GET  /api/observability/traces/{trace_id}
+GET  /api/evaluations/latest
+POST /api/chat
+POST /api/insights/generate
+POST /api/reports/weekly-brief
+```
+
+These endpoints expose structured operational metadata and deterministic evaluation results. They do not expose hidden chain-of-thought or frontend provider secrets.
+
+Chat requests use the AI orchestration boundary:
+
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/api/chat -ContentType "application/json" -Body '{"question":"What was revenue last month?"}'
+```
+
+## Frontend Admin Views
+
+The frontend includes:
+
+```text
+/                    AI chat workspace
+/admin/traces       AI trace viewer
+/admin/evaluations  Evaluation dashboard
+```
+
+The evaluation dashboard displays metrics returned by the backend eval runner, not hardcoded UI-only values.

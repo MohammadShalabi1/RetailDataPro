@@ -32,6 +32,8 @@ class ToolExecutionContext(BaseModel):
     user_role: str = "analyst"
     trace: Any | None = None
     analytics_service: Any | None = None
+    document_service: Any | None = None
+    document_source_ids: list[str] = Field(default_factory=list)
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -65,3 +67,17 @@ class AnalyticsSummaryOutput(BaseModel):
     summary_type: str
     question: str
     data: dict[str, Any]
+
+
+class DocumentSearchInput(BaseModel):
+    question: str = Field(min_length=1, max_length=1_000)
+    limit: int = Field(default=5, ge=1, le=10)
+    source_ids: list[str] = Field(default_factory=list, max_length=10)
+
+
+class DocumentSearchOutput(BaseModel):
+    query: str
+    chunks: list[dict[str, Any]]
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    limitations: list[str] = Field(default_factory=list)
+    retrieval_trace: dict[str, Any] = Field(default_factory=dict)

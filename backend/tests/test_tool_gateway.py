@@ -15,6 +15,7 @@ from app.tools.schemas import ToolExecutionContext, ToolExecutionRequest, ToolNa
 class FakeAnalyticsService:
     def __init__(self) -> None:
         self.revenue_calls = []
+        self.top_product_calls = []
 
     def get_revenue(self, start_date=None, end_date=None) -> RevenueResponse:
         self.revenue_calls.append((start_date, end_date))
@@ -25,6 +26,40 @@ class FakeAnalyticsService:
             order_count=5,
             average_order_value_cents=5_000,
         )
+
+    def get_top_products(self, start_date=None, end_date=None, limit=10):
+        self.top_product_calls.append((start_date, end_date, limit))
+        return {
+            "start_date": start_date or date(2026, 1, 1),
+            "end_date": end_date or date(2026, 1, 31),
+            "items": [
+                {
+                    "product_id": "prod_1",
+                    "product_name": "Everyday Coffee",
+                    "sku": "COF-001",
+                    "category_name": "Grocery",
+                    "revenue_cents": 50_000,
+                    "units_sold": 25,
+                    "order_count": 12,
+                }
+            ],
+        }
+
+    def get_category_performance(self, start_date=None, end_date=None, limit=10):
+        return {
+            "start_date": start_date or date(2026, 8, 1),
+            "end_date": end_date or date(2026, 8, 31),
+            "items": [
+                {
+                    "category_id": "cat_1",
+                    "category_name": "Household",
+                    "revenue_cents": 90_000,
+                    "units_sold": 120,
+                    "order_count": 40,
+                    "gross_margin_cents": 20_000,
+                }
+            ],
+        }
 
 
 class SlowInput(BaseModel):
@@ -123,6 +158,31 @@ async def test_analytics_summary_returns_typed_output_through_gateway() -> None:
     assert result.output["summary_type"] == "revenue"
     assert result.output["data"]["total_revenue_cents"] == 25_000
     assert analytics_service.revenue_calls == [(date(2026, 1, 1), date(2026, 1, 31))]
+
+
+@pytest.mark.asyncio
+async def test_best_selling_question_uses_top_products_summary() -> None:
+    result = await authorize_and_execute_tool(
+        ToolExecutionRequest(tool_name="analytics_summary", input={"question": "What is our best selling product last week?"}),
+        ToolExecutionContext(user_role="analyst", analytics_service=FakeAnalyticsService()),
+    )
+
+    assert result.status == ToolStatus.success
+    assert result.output["summary_type"] == "top_products"
+
+
+@pytest.mark.asyncio
+async def test_category_question_takes_precedence_over_supplier_word() -> None:
+    result = await authorize_and_execute_tool(
+        ToolExecutionRequest(
+            tool_name="analytics_summary",
+            input={"question": "Which product categories were weak and do supplier issues explain them?"},
+        ),
+        ToolExecutionContext(user_role="analyst", analytics_service=FakeAnalyticsService()),
+    )
+
+    assert result.status == ToolStatus.success
+    assert result.output["summary_type"] == "category_performance"
 
 
 @pytest.mark.asyncio

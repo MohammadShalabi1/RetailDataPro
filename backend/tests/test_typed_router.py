@@ -161,6 +161,26 @@ def test_deterministic_route_detects_mixed_sources() -> None:
     assert route.reason_code == RouteReason.fallback_keyword
 
 
+@pytest.mark.asyncio
+async def test_model_multi_source_route_is_corrected_for_pure_retail_question() -> None:
+    provider = FakeProvider(
+        [
+            {
+                "category": "multi_source",
+                "confidence": 0.94,
+                "reason_code": "mixed_sources",
+            }
+        ]
+    )
+    router = TypedRouter(provider)
+
+    route = await router.select_route("What was revenue last month?")
+
+    assert route.category == RouteCategory.retail_analytics
+    assert route.reason_code == RouteReason.retail_metric
+    assert route.confidence == 0.78
+
+
 def test_model_route_validates_confidence_instead_of_clamping() -> None:
     with pytest.raises(ValidationError):
         ModelRoute(category="retail_analytics", confidence=8.7, reason_code="retail_metric")

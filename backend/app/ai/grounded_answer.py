@@ -67,7 +67,9 @@ def _prompt(question: str, evidence: GroundingEvidence, prompt_version: str) -> 
     return (
         f"Prompt version: {prompt_version}\n"
         "Answer only from provided tool results and retrieved chunks. "
-        "Citations must map to the supplied source_id/chunk_id values. "
+        "Citations are optional for deterministic tool results. "
+        "When citing retrieved chunks, citations must map to the supplied source_id/chunk_id values. "
+        "When citing tool results, use the tool name as source_id and omit chunk_id. "
         "Admit when evidence is insufficient.\n"
         f"Evidence: {evidence.model_dump(mode='json')}\n"
         f"Question: {question}"
@@ -81,6 +83,10 @@ def _allowed_citations(evidence: GroundingEvidence) -> set[tuple[str, str | None
         chunk_id = chunk.get("chunk_id")
         if source_id:
             allowed.add((source_id, chunk_id))
+    for result in evidence.tool_results:
+        tool_name = result.get("tool_name")
+        if tool_name:
+            allowed.add((tool_name, None))
     for item in evidence.source_metadata:
         source_id = item.get("source_id")
         if source_id:

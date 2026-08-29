@@ -11,3 +11,13 @@ class PGVector(UserDefinedType):
 
     def get_col_spec(self, **kw) -> str:
         return f"vector({self.dimensions})"
+
+    def bind_processor(self, dialect):
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            return "[" + ",".join(str(float(item)) for item in value) + "]"
+
+        return process

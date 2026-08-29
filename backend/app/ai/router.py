@@ -50,7 +50,7 @@ class TypedRouter:
                     response_model=ModelRoute,
                 )
             )
-            route = _validate_route(response.content)
+            route = _normalize_capability_route(question, _validate_route(response.content))
             provider_metadata = _response_metadata(response)
         except (AIProviderError, ValidationError, TypeError, ValueError):
             repair_used = True
@@ -61,7 +61,7 @@ class TypedRouter:
                         response_model=ModelRoute,
                     )
                 )
-                route = _validate_route(response.content)
+                route = _normalize_capability_route(question, _validate_route(response.content))
                 provider_metadata = _response_metadata(response)
             except (AIProviderError, ValidationError, TypeError, ValueError):
                 fallback_used = True
@@ -138,6 +138,25 @@ def deterministic_route(question: str) -> ModelRoute:
         confidence=0.5,
         reason_code=RouteReason.fallback_keyword,
     )
+
+
+def _normalize_capability_route(question: str, route: ModelRoute) -> ModelRoute:
+    normalized = question.lower()
+    has_retail = _contains_any(normalized, RETAIL_ANALYTICS_KEYWORDS)
+    has_document = _contains_any(normalized, DOCUMENT_KEYWORDS)
+    has_web = _contains_any(normalized, WEBSITE_KEYWORDS)
+
+    if has_retail and not has_document and not has_web and route.category in {
+        RouteCategory.multi_source,
+        RouteCategory.document_search,
+        RouteCategory.website_search,
+    }:
+        return ModelRoute(
+            category=RouteCategory.retail_analytics,
+            confidence=min(route.confidence, 0.78),
+            reason_code=RouteReason.retail_metric,
+        )
+    return route
 
 
 RETAIL_ANALYTICS_KEYWORDS = {

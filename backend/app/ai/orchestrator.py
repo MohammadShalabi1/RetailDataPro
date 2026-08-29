@@ -11,6 +11,7 @@ from app.ai.context_budget import ContextBudgeter
 from app.ai.errors import AIProviderError
 from app.ai.grounded_answer import GroundedAnswerGenerator, GroundingEvidence
 from app.ai.model_router import ModelRouter, ModelSelection, ModelTask
+from app.ai.multi_source_synthesis import build_multi_source_evidence, synthesize_multi_source_answer
 from app.ai.planner import ExecutionPlan, PlanStep, PlanStepKind, QueryPlanner
 from app.ai.provider import AIProvider
 from app.ai.router import ModelRoute, RouteCategory, RouteReason, TypedRouter
@@ -44,6 +45,7 @@ class OrchestrationTrace(BaseModel):
 class AgentTurnRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
     conversation_id: str | None = None
+    document_source_ids: list[str] = Field(default_factory=list, max_length=10)
 
 
 class AgentTurnResult(BaseModel):
@@ -59,6 +61,12 @@ class AgentTurnResult(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class GroundingPayload(BaseModel):
+    tool_results: list[dict[str, Any]]
+    retrieved_chunks: list[dict[str, Any]]
+    limitations: list[str] = Field(default_factory=list)
+
+
 @dataclass
 class AgentDependencies:
     ai_provider: AIProvider
@@ -69,6 +77,7 @@ class AgentDependencies:
     context_budgeter: ContextBudgeter = field(default_factory=ContextBudgeter)
     grounded_answer_generator: GroundedAnswerGenerator | None = None
     analytics_service: Any | None = None
+    document_service: Any | None = None
     user_role: str = "analyst"
 
     def router(self) -> TypedRouter:
@@ -212,6 +221,8 @@ async def execute_tools(
     context = ToolExecutionContext(
         user_role=dependencies.user_role,
         analytics_service=dependencies.analytics_service,
+        document_service=dependencies.document_service,
+        document_source_ids=request.document_source_ids,
         trace=trace,
     )
     results = await asyncio.gather(
@@ -282,7 +293,11 @@ async def generate_answer(
 ) -> dict[str, Any]:
     if route.category is not RouteCategory.conversation:
         missing = _missing_required_evidence(answer_context["execution_plan"], tool_results)
+        grounding_payload = _grounding_payload_from_tool_results(tool_results)
+        limitations = [*grounding_payload.limitations]
         if missing:
+            limitations.append(f"Missing required evidence from: {', '.join(missing)}")
+        if missing and not grounding_payload.tool_results and not grounding_payload.retrieved_chunks:
             trace.record({"stage": "generate_answer", "status": "skipped", "reason": "missing_required_evidence", "missing": missing})
             return {
                 "answer": (
@@ -290,27 +305,49 @@ async def generate_answer(
                     "One or more required tools are unavailable or failed."
                 ),
                 "confidence": min(route.confidence, 0.4),
-                "limitations": [f"Missing required evidence from: {', '.join(missing)}"],
+                "limitations": limitations,
             }
 
         try:
             grounded = await dependencies.grounded_generator().generate(
                 request.question,
-                GroundingEvidence(tool_results=[result.model_dump(mode="json") for result in tool_results]),
+                GroundingEvidence(
+                    tool_results=grounding_payload.tool_results,
+                    retrieved_chunks=grounding_payload.retrieved_chunks,
+                ),
                 model=model_selection.model,
             )
-            trace.record({"stage": "generate_answer", "status": "ok", "reason": "grounded_answer", "citation_count": len(grounded.citations)})
+            trace.record(
+                {
+                    "stage": "generate_answer",
+                    "status": "ok",
+                    "reason": "grounded_answer",
+                    "citation_count": len(grounded.citations),
+                    "tool_evidence_count": len(grounding_payload.tool_results),
+                    "retrieved_chunk_count": len(grounding_payload.retrieved_chunks),
+                }
+            )
             return {
                 "answer": grounded.answer,
                 "confidence": min(route.confidence, grounded.confidence),
-                "limitations": grounded.limitations,
+                "limitations": [*limitations, *grounded.limitations],
             }
-        except AIProviderError:
-            trace.record({"stage": "generate_answer", "status": "fallback", "reason": "grounded_provider_error"})
+        except AIProviderError as exc:
+            trace.record(
+                {
+                    "stage": "generate_answer",
+                    "status": "fallback",
+                    "reason": "grounded_provider_error",
+                    "error_type": exc.__class__.__name__,
+                    "tool_evidence_count": len(grounding_payload.tool_results),
+                    "retrieved_chunk_count": len(grounding_payload.retrieved_chunks),
+                }
+            )
+            synthesized = _safe_grounded_generation_failure_answer(request.question, route, grounding_payload)
             return {
-                "answer": _tool_grounded_answer(route, tool_results),
+                "answer": synthesized,
                 "confidence": min(route.confidence, 0.5),
-                "limitations": ["Grounded answer generation failed; returned a bounded tool-result summary."],
+                "limitations": [*limitations, "Grounded answer generation failed after evidence collection."],
             }
 
     try:
@@ -373,7 +410,10 @@ def _conversation_prompt(question: str, answer_context: dict[str, Any]) -> str:
 def _tool_input_for_step(request: AgentTurnRequest, step: PlanStep) -> dict[str, Any]:
     if step.tool_name is None:
         return {}
-    return {"question": request.question}
+    payload: dict[str, Any] = {"question": request.question}
+    if step.tool_name.value == "document_search":
+        payload["source_ids"] = request.document_source_ids
+    return payload
 
 
 def _missing_required_evidence(execution_plan_payload: dict[str, Any], tool_results: list[ToolExecutionResult]) -> list[str]:
@@ -384,18 +424,56 @@ def _missing_required_evidence(execution_plan_payload: dict[str, Any], tool_resu
             continue
         tool_name = step.get("tool_name")
         result = result_by_tool.get(tool_name)
-        if result is None or result.status is not ToolStatus.success:
+        if result is None or result.status is not ToolStatus.success or _has_empty_required_output(result):
             missing.append(tool_name or step["id"])
     return missing
 
 
-def _tool_grounded_answer(route: ModelRoute, tool_results: list[ToolExecutionResult]) -> str:
-    summaries = []
+def _has_empty_required_output(result: ToolExecutionResult) -> bool:
+    if result.tool_name == "analytics_summary":
+        return result.output.get("summary_type") == "dependency_missing"
+    if result.tool_name == "document_search":
+        return len(result.output.get("chunks") or []) == 0
+    return False
+
+
+def _grounding_payload_from_tool_results(tool_results: list[ToolExecutionResult]) -> GroundingPayload:
+    successful_tools: list[dict[str, Any]] = []
+    chunks: list[dict[str, Any]] = []
+    limitations: list[str] = []
     for result in tool_results:
-        summary_type = result.output.get("summary_type", result.tool_name)
-        summaries.append(f"{result.tool_name} returned `{summary_type}` data.")
-    joined = " ".join(summaries) if summaries else "No tool data was returned."
-    return f"Route `{route.category.value}` completed with verified tool output. {joined}"
+        if result.status is not ToolStatus.success:
+            limitations.append(f"{result.tool_name} evidence was unavailable.")
+            continue
+        if result.tool_name == "analytics_summary" and result.output.get("summary_type") != "dependency_missing":
+            successful_tools.append(result.model_dump(mode="json"))
+            continue
+        if result.tool_name == "document_search" and result.output.get("chunks"):
+            successful_tools.append(result.model_dump(mode="json"))
+        elif result.tool_name == "document_search":
+            limitations.append("Document evidence was unavailable.")
+            continue
+        for chunk in result.output.get("chunks") or []:
+            chunks.append(
+                {
+                    "source_id": chunk.get("source_id"),
+                    "chunk_id": chunk.get("chunk_id"),
+                    "source_title": chunk.get("title"),
+                    "chunk_index": chunk.get("chunk_index"),
+                    "content": chunk.get("content"),
+                    "score": chunk.get("score"),
+                    "retrieval_method": "postgres_full_text_or_recent_document_fallback",
+                }
+            )
+    return GroundingPayload(tool_results=successful_tools, retrieved_chunks=chunks, limitations=limitations)
+
+
+def _safe_grounded_generation_failure_answer(question: str, route: ModelRoute, evidence: GroundingPayload) -> str:
+    if not evidence.tool_results and not evidence.retrieved_chunks:
+        return "I could not gather enough verified evidence to answer this question because the required data sources were unavailable."
+    if route.category is RouteCategory.multi_source:
+        return synthesize_multi_source_answer(build_multi_source_evidence(question, evidence.tool_results, evidence.retrieved_chunks))
+    return "I gathered partial evidence, but it was not enough to produce a supported answer."
 
 def _safe_event(event: dict[str, Any]) -> dict[str, Any]:
     blocked_keys = {"api_key", "secret", "token", "password", "authorization"}

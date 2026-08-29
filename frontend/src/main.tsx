@@ -13,6 +13,14 @@ const router = createBrowserRouter([
     path: '/',
     element: <App />,
   },
+  {
+    path: '/admin/traces',
+    element: <App view="traces" />,
+  },
+  {
+    path: '/admin/evaluations',
+    element: <App view="evaluations" />,
+  },
 ]);
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
