@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     database_url: str = "postgresql+psycopg://retaildata_user:change-me@localhost:5432/retaildata_pro"
+    readonly_database_url: str | None = None
     gemini_api_key: str | None = None
     gemini_text_model: str = "gemini-3.5-flash-lite"
     gemini_structured_model: str = "gemini-3.6-flash"
@@ -40,6 +41,10 @@ class Settings(BaseSettings):
     @property
     def database_configured(self) -> bool:
         return self.database_url.startswith("postgresql")
+
+    @property
+    def readonly_database_configured(self) -> bool:
+        return self.readonly_database_url is not None and self.readonly_database_url.startswith("postgresql")
 
 
 @lru_cache

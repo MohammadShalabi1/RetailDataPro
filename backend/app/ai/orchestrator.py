@@ -1,43 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import asyncio
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.ai.context_budget import ContextBudgeter
 from app.ai.errors import AIProviderError
+from app.ai.grounded_answer import GroundedAnswerGenerator, GroundingEvidence
 from app.ai.model_router import ModelRouter, ModelSelection, ModelTask
+from app.ai.planner import ExecutionPlan, PlanStep, PlanStepKind, QueryPlanner
 from app.ai.provider import AIProvider
 from app.ai.router import ModelRoute, RouteCategory, RouteReason, TypedRouter
 from app.ai.schemas import AIResponse, TextGenerationRequest
-
-MAX_PLAN_STEPS = 3
+from app.tools.gateway import authorize_and_execute_tool
+from app.tools.registry import ToolRegistry, build_default_tool_registry
+from app.tools.schemas import ToolExecutionContext, ToolExecutionRequest, ToolExecutionResult, ToolStatus
 
 
 class InputPolicyStatus(str, Enum):
     allow = "allow"
     block = "block"
-
-
-class PlanStep(BaseModel):
-    name: str
-    goal: str
-    requires_tool: bool = False
-
-
-class ExecutionPlan(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
-    route: RouteCategory
-    model_task: ModelTask
-    steps: list[PlanStep] = Field(max_length=MAX_PLAN_STEPS)
-
-
-class ToolExecutionResult(BaseModel):
-    tool_name: str
-    status: str
-    output: dict[str, Any] = Field(default_factory=dict)
 
 
 class InputPolicyDecision(BaseModel):
@@ -79,9 +64,18 @@ class AgentDependencies:
     ai_provider: AIProvider
     typed_router: TypedRouter | None = None
     model_router: ModelRouter = field(default_factory=ModelRouter)
+    query_planner: QueryPlanner = field(default_factory=QueryPlanner)
+    tool_registry: ToolRegistry = field(default_factory=build_default_tool_registry)
+    context_budgeter: ContextBudgeter = field(default_factory=ContextBudgeter)
+    grounded_answer_generator: GroundedAnswerGenerator | None = None
+    analytics_service: Any | None = None
+    user_role: str = "analyst"
 
     def router(self) -> TypedRouter:
         return self.typed_router or TypedRouter(self.ai_provider)
+
+    def grounded_generator(self) -> GroundedAnswerGenerator:
+        return self.grounded_answer_generator or GroundedAnswerGenerator(self.ai_provider)
 
 
 async def run_turn(request: AgentTurnRequest, dependencies: AgentDependencies) -> AgentTurnResult:
@@ -92,12 +86,12 @@ async def run_turn(request: AgentTurnRequest, dependencies: AgentDependencies) -
         return _blocked_result(policy, trace)
 
     route = await select_route(request, dependencies, trace)
-    execution_plan = plan_execution(route, trace)
+    execution_plan = plan_execution(request, route, dependencies, trace)
     model_selection = select_model(execution_plan, dependencies, trace)
     authorized_plan = authorize_tools(execution_plan, trace)
-    tool_results = await execute_tools(authorized_plan, trace)
-    answer_context = build_context(context, route, model_selection, authorized_plan, tool_results, trace)
-    answer = await generate_answer(request, dependencies, route, model_selection, answer_context, trace)
+    tool_results = await execute_tools(request, authorized_plan, dependencies, trace)
+    answer_context = build_context(context, route, model_selection, authorized_plan, tool_results, dependencies, trace)
+    answer = await generate_answer(request, dependencies, route, model_selection, answer_context, tool_results, trace)
     validated_answer = validate_answer(answer, route, authorized_plan, trace)
     finalize_trace(trace)
 
@@ -160,26 +154,13 @@ async def select_route(
     return route
 
 
-def plan_execution(route: ModelRoute, trace: OrchestrationTrace) -> ExecutionPlan:
-    if route.category is RouteCategory.conversation:
-        model_task = ModelTask.analytics_answer
-        steps = [PlanStep(name="answer_conversation", goal="Answer the user conversationally.")]
-    elif route.category is RouteCategory.multi_source:
-        model_task = ModelTask.multi_source_synthesis
-        steps = [
-            PlanStep(name="await_tool_gateway", goal="Use multiple sources after Phase 8 tools exist.", requires_tool=True)
-        ]
-    elif route.category is RouteCategory.retail_analytics:
-        model_task = ModelTask.analytics_answer
-        steps = [PlanStep(name="await_analytics_tool", goal="Use deterministic analytics after Phase 8 tools exist.", requires_tool=True)]
-    elif route.category is RouteCategory.document_search:
-        model_task = ModelTask.structured_generation
-        steps = [PlanStep(name="await_document_tool", goal="Search documents after Phase 8 tools exist.", requires_tool=True)]
-    else:
-        model_task = ModelTask.structured_generation
-        steps = [PlanStep(name="await_website_tool", goal="Search websites after Phase 8 tools exist.", requires_tool=True)]
-
-    plan = ExecutionPlan(route=route.category, model_task=model_task, steps=steps)
+def plan_execution(
+    request: AgentTurnRequest,
+    route: ModelRoute,
+    dependencies: AgentDependencies,
+    trace: OrchestrationTrace,
+) -> ExecutionPlan:
+    plan = dependencies.query_planner.create_plan(request.question, route)
     trace.record(
         {
             "stage": "plan_execution",
@@ -187,6 +168,8 @@ def plan_execution(route: ModelRoute, trace: OrchestrationTrace) -> ExecutionPla
             "route": plan.route.value,
             "model_task": plan.model_task.value,
             "step_count": len(plan.steps),
+            "requires_synthesis": plan.requires_synthesis,
+            "steps": [step.model_dump(mode="json") for step in plan.steps],
         }
     )
     return plan
@@ -203,27 +186,56 @@ def select_model(
 
 
 def authorize_tools(execution_plan: ExecutionPlan, trace: OrchestrationTrace) -> ExecutionPlan:
+    tool_steps = execution_plan.tool_steps
     trace.record(
         {
             "stage": "authorize_tools",
             "status": "ok",
-            "authorized_tool_count": 0,
-            "requires_future_gateway": any(step.requires_tool for step in execution_plan.steps),
+            "authorized_tool_count": len(tool_steps),
+            "tool_names": [step.tool_name.value for step in tool_steps if step.tool_name is not None],
         }
     )
     return execution_plan
 
 
-async def execute_tools(execution_plan: ExecutionPlan, trace: OrchestrationTrace) -> list[ToolExecutionResult]:
+async def execute_tools(
+    request: AgentTurnRequest,
+    execution_plan: ExecutionPlan,
+    dependencies: AgentDependencies,
+    trace: OrchestrationTrace,
+) -> list[ToolExecutionResult]:
+    tool_steps = execution_plan.tool_steps
+    if not tool_steps:
+        trace.record({"stage": "execute_tools", "status": "skipped", "tool_result_count": 0})
+        return []
+
+    context = ToolExecutionContext(
+        user_role=dependencies.user_role,
+        analytics_service=dependencies.analytics_service,
+        trace=trace,
+    )
+    results = await asyncio.gather(
+        *[
+            authorize_and_execute_tool(
+                ToolExecutionRequest(
+                    tool_name=step.tool_name.value if step.tool_name is not None else "",
+                    input=_tool_input_for_step(request, step),
+                ),
+                context=context,
+                registry=dependencies.tool_registry,
+            )
+            for step in tool_steps
+        ]
+    )
     trace.record(
         {
             "stage": "execute_tools",
-            "status": "skipped",
-            "tool_result_count": 0,
-            "reason": "typed_tool_gateway_not_implemented",
+            "status": "ok",
+            "tool_result_count": len(results),
+            "statuses": [result.status.value for result in results],
         }
     )
-    return []
+    return list(results)
 
 
 def build_context(
@@ -232,6 +244,7 @@ def build_context(
     model_selection: ModelSelection,
     execution_plan: ExecutionPlan,
     tool_results: list[ToolExecutionResult],
+    dependencies: AgentDependencies,
     trace: OrchestrationTrace,
 ) -> dict[str, Any]:
     context = {
@@ -240,6 +253,19 @@ def build_context(
         "model_selection": model_selection.to_trace_metadata(),
         "execution_plan": execution_plan.model_dump(mode="json"),
         "tool_results": [result.model_dump(mode="json") for result in tool_results],
+    }
+    budgeted = dependencies.context_budgeter.build(
+        user_question="",
+        system_instructions="RetailData-Pro grounded assistant.",
+        recent_conversation=loaded_context.get("recent_messages", []),
+        tool_results=[result.model_dump(mode="json") for result in tool_results],
+        retrieved_evidence=[],
+    )
+    context["budgeted_context"] = {
+        **budgeted.model_dump(mode="json"),
+        "route": route.category.value,
+        "model": model_selection.model,
+        "step_count": len(execution_plan.steps),
     }
     trace.record({"stage": "build_context", "status": "ok", "tool_result_count": len(tool_results)})
     return context
@@ -251,18 +277,41 @@ async def generate_answer(
     route: ModelRoute,
     model_selection: ModelSelection,
     answer_context: dict[str, Any],
+    tool_results: list[ToolExecutionResult],
     trace: OrchestrationTrace,
 ) -> dict[str, Any]:
     if route.category is not RouteCategory.conversation:
-        trace.record({"stage": "generate_answer", "status": "skipped", "reason": "tools_not_implemented"})
-        return {
-            "answer": (
-                f"Route `{route.category.value}` was selected, but tool execution is not available until the typed "
-                "tool gateway is implemented."
-            ),
-            "confidence": min(route.confidence, 0.5),
-            "limitations": ["Tool execution is not implemented until Phase 8."],
-        }
+        missing = _missing_required_evidence(answer_context["execution_plan"], tool_results)
+        if missing:
+            trace.record({"stage": "generate_answer", "status": "skipped", "reason": "missing_required_evidence", "missing": missing})
+            return {
+                "answer": (
+                    "I do not have enough verified evidence to answer that yet. "
+                    "One or more required tools are unavailable or failed."
+                ),
+                "confidence": min(route.confidence, 0.4),
+                "limitations": [f"Missing required evidence from: {', '.join(missing)}"],
+            }
+
+        try:
+            grounded = await dependencies.grounded_generator().generate(
+                request.question,
+                GroundingEvidence(tool_results=[result.model_dump(mode="json") for result in tool_results]),
+                model=model_selection.model,
+            )
+            trace.record({"stage": "generate_answer", "status": "ok", "reason": "grounded_answer", "citation_count": len(grounded.citations)})
+            return {
+                "answer": grounded.answer,
+                "confidence": min(route.confidence, grounded.confidence),
+                "limitations": grounded.limitations,
+            }
+        except AIProviderError:
+            trace.record({"stage": "generate_answer", "status": "fallback", "reason": "grounded_provider_error"})
+            return {
+                "answer": _tool_grounded_answer(route, tool_results),
+                "confidence": min(route.confidence, 0.5),
+                "limitations": ["Grounded answer generation failed; returned a bounded tool-result summary."],
+            }
 
     try:
         response = await dependencies.ai_provider.generate_text(
@@ -320,6 +369,33 @@ def _conversation_prompt(question: str, answer_context: dict[str, Any]) -> str:
         f"Question: {question}"
     )
 
+
+def _tool_input_for_step(request: AgentTurnRequest, step: PlanStep) -> dict[str, Any]:
+    if step.tool_name is None:
+        return {}
+    return {"question": request.question}
+
+
+def _missing_required_evidence(execution_plan_payload: dict[str, Any], tool_results: list[ToolExecutionResult]) -> list[str]:
+    result_by_tool = {result.tool_name: result for result in tool_results}
+    missing: list[str] = []
+    for step in execution_plan_payload["steps"]:
+        if step["kind"] != PlanStepKind.tool.value or not step["required"]:
+            continue
+        tool_name = step.get("tool_name")
+        result = result_by_tool.get(tool_name)
+        if result is None or result.status is not ToolStatus.success:
+            missing.append(tool_name or step["id"])
+    return missing
+
+
+def _tool_grounded_answer(route: ModelRoute, tool_results: list[ToolExecutionResult]) -> str:
+    summaries = []
+    for result in tool_results:
+        summary_type = result.output.get("summary_type", result.tool_name)
+        summaries.append(f"{result.tool_name} returned `{summary_type}` data.")
+    joined = " ".join(summaries) if summaries else "No tool data was returned."
+    return f"Route `{route.category.value}` completed with verified tool output. {joined}"
 
 def _safe_event(event: dict[str, Any]) -> dict[str, Any]:
     blocked_keys = {"api_key", "secret", "token", "password", "authorization"}

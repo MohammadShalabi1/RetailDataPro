@@ -31,6 +31,7 @@ http://localhost:8000/api/health
 ## Database Setup
 
 Create a PostgreSQL database locally or in a managed PostgreSQL service, then set `DATABASE_URL` in `backend/.env`.
+Hybrid retrieval migrations require PostgreSQL with the `pgvector` extension available.
 
 Run migrations:
 
@@ -147,7 +148,7 @@ validate_answer
 finalize_trace
 ```
 
-The input policy runs before model calls. Tool execution is intentionally skipped until the typed tool gateway is implemented.
+The input policy runs before model calls. Non-conversation routes use a bounded execution plan and send approved tool steps through the typed tool gateway.
 
 ## Typed Tool Gateway
 
@@ -167,3 +168,15 @@ website_search
 ```
 
 Only `analytics_summary` is executable today. SQL, document, and website tools are registered but return safe unavailable results until their dedicated phases are implemented.
+
+## Safe Text-to-SQL and Grounding Internals
+
+The backend includes internal building blocks for later analyst answers:
+
+```text
+schema linking -> structured SQL generation -> AST guard -> optional read-only execution -> grounded answer
+```
+
+Generated SQL is validated with a parser before execution, limited to one PostgreSQL `SELECT`, approved tables/schemas, safe functions, and a bounded row limit. Configure `READONLY_DATABASE_URL` separately from `DATABASE_URL` before enabling any live SQL execution path.
+
+Hybrid retrieval uses PostgreSQL `pgvector` plus full-text search on `source_chunks`, then combines dense and lexical candidates with reciprocal rank fusion. Reranking, context budgeting, bounded memory, semantic cache identity, and grounded answer schemas are implemented as internal modules for later orchestration phases.

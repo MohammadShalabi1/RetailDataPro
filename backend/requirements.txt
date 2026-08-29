@@ -9,4 +9,5 @@ pydantic-settings==2.4.0
 pytest==8.3.2
 pytest-asyncio==0.24.0
 SQLAlchemy==2.0.34
+sqlglot==25.20.2
 uvicorn[standard]==0.30.6

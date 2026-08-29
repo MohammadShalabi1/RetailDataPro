@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+from app.database.types import PGVector
 
 
 class TimestampMixin:
@@ -195,6 +197,8 @@ class SourceChunk(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("source_id", "chunk_index", name="uq_source_chunks_source_index"),
         Index("ix_source_chunks_source_chunk", "source_id", "chunk_index"),
+        Index("ix_source_chunks_search_vector", "search_vector", postgresql_using="gin"),
+        Index("ix_source_chunks_embedding", "embedding", postgresql_using="ivfflat", postgresql_ops={"embedding": "vector_cosine_ops"}),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -207,6 +211,8 @@ class SourceChunk(TimestampMixin, Base):
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(PGVector(768), nullable=True)
+    search_vector: Mapped[Any | None] = mapped_column(TSVECTOR, nullable=True)
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     source: Mapped[Source] = relationship(back_populates="chunks")

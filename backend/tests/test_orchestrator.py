@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from app.ai.errors import AIProviderResponseError
+from app.ai.grounded_answer import GroundedAnswer
 from app.ai.model_router import ModelRouter, ModelTask
 from app.ai.orchestrator import AgentDependencies, AgentTurnRequest, run_turn
 from app.ai.provider import AIProvider
 from app.ai.router import ModelRoute, RouteCategory, RouteReason
 from app.ai.schemas import AIResponse, StructuredGenerationRequest, TextGenerationRequest
 from app.core.config import Settings
+from app.schemas.analytics import RevenueResponse
+from app.tools.schemas import ToolStatus
+
+from datetime import date
 
 
 class FakeProvider(AIProvider):
@@ -31,7 +36,12 @@ class FakeProvider(AIProvider):
 
     async def generate_structured(self, request: StructuredGenerationRequest) -> AIResponse:
         self.structured_calls.append(request)
-        raise NotImplementedError
+        return AIResponse(
+            content=GroundedAnswer(answer="Grounded retail answer.", citations=[], confidence=0.74),
+            model=request.model or "fake-model",
+            provider="fake",
+            latency_ms=7,
+        )
 
 
 class FakeTypedRouter:
@@ -42,6 +52,21 @@ class FakeTypedRouter:
     async def select_route(self, question: str):
         self.calls += 1
         return self.route
+
+
+class FakeAnalyticsService:
+    def __init__(self) -> None:
+        self.revenue_calls = []
+
+    def get_revenue(self, start_date=None, end_date=None) -> RevenueResponse:
+        self.revenue_calls.append((start_date, end_date))
+        return RevenueResponse(
+            start_date=start_date or date(2026, 1, 1),
+            end_date=end_date or date(2026, 1, 31),
+            total_revenue_cents=50_000,
+            order_count=10,
+            average_order_value_cents=5_000,
+        )
 
 
 def test_run_turn_records_stages_in_order_for_conversation() -> None:
@@ -96,7 +121,7 @@ def test_route_selection_feeds_execution_plan() -> None:
     assert result.route.category == RouteCategory.retail_analytics
     assert result.execution_plan is not None
     assert result.execution_plan.route == RouteCategory.retail_analytics
-    assert result.execution_plan.steps[0].requires_tool is True
+    assert result.execution_plan.steps[0].tool_name.value == "analytics_summary"
 
 
 def test_model_selection_is_based_on_execution_plan() -> None:
@@ -124,16 +149,35 @@ def test_conversation_route_generates_provider_backed_answer() -> None:
     assert provider.text_calls[0].model == "gemini-3.5-flash-lite"
 
 
-def test_non_conversation_route_does_not_fake_tool_results() -> None:
+def test_future_tool_route_stops_when_required_evidence_is_missing() -> None:
     provider = FakeProvider()
     dependencies = _dependencies(provider, _route(RouteCategory.document_search, RouteReason.document_reference))
 
     result = _run(dependencies, "What does the supplier report say?")
 
-    assert "tool execution is not available" in result.answer
-    assert result.tool_results == []
+    assert "not have enough verified evidence" in result.answer
+    assert result.tool_results[0].status == ToolStatus.unavailable
     assert provider.text_calls == []
-    assert result.limitations == ["Tool execution is not implemented until Phase 8."]
+    assert result.limitations == ["Missing required evidence from: document_search"]
+
+
+def test_retail_analytics_route_executes_gateway_tool() -> None:
+    provider = FakeProvider()
+    analytics_service = FakeAnalyticsService()
+    dependencies = _dependencies(
+        provider,
+        _route(RouteCategory.retail_analytics, RouteReason.retail_metric),
+        analytics_service=analytics_service,
+    )
+
+    result = _run(dependencies, "What was revenue last month?")
+
+    assert result.tool_results[0].tool_name == "analytics_summary"
+    assert result.tool_results[0].status == ToolStatus.success
+    assert result.tool_results[0].output["data"]["total_revenue_cents"] == 50_000
+    assert result.answer == "Grounded retail answer."
+    assert provider.text_calls == []
+    assert provider.structured_calls[0].model == "gemini-3.5-flash-lite"
 
 
 def test_provider_failure_during_answer_generation_returns_safe_fallback() -> None:
@@ -167,11 +211,31 @@ def test_execution_plan_is_bounded() -> None:
     assert len(result.execution_plan.steps) <= 3
 
 
-def _dependencies(provider: FakeProvider, route: ModelRoute) -> AgentDependencies:
+def test_multi_source_plan_is_stored_in_trace() -> None:
+    dependencies = _dependencies(FakeProvider(), _route(RouteCategory.multi_source, RouteReason.mixed_sources))
+
+    result = _run(dependencies, "Compare revenue with the supplier report.")
+
+    plan_event = next(event for event in result.trace.events if event["stage"] == "plan_execution")
+    assert plan_event["route"] == "multi_source"
+    assert plan_event["step_count"] == 2
+    assert plan_event["steps"][0]["tool_name"] == "analytics_summary"
+
+
+def test_gateway_tool_events_occur_before_answer_generation() -> None:
+    dependencies = _dependencies(FakeProvider(), _route(RouteCategory.document_search, RouteReason.document_reference))
+
+    result = _run(dependencies, "What does the report say?")
+
+    assert result.trace.stages.index("tool_gateway") < result.trace.stages.index("generate_answer")
+
+
+def _dependencies(provider: FakeProvider, route: ModelRoute, analytics_service=None) -> AgentDependencies:
     return AgentDependencies(
         ai_provider=provider,
         typed_router=FakeTypedRouter(route),
         model_router=ModelRouter(settings=_settings()),
+        analytics_service=analytics_service,
     )
 
 

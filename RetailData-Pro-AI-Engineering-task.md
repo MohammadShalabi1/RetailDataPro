@@ -538,13 +538,13 @@ The planner returns:
 
 Requirements:
 
-- [ ] structured plan
-- [ ] maximum number of steps
-- [ ] approved tools only
-- [ ] execute independent steps concurrently with `asyncio.gather`
-- [ ] stop if required evidence is missing
-- [ ] synthesize only after tool completion
-- [ ] store execution plan in trace
+- [x] structured plan
+- [x] maximum number of steps
+- [x] approved tools only
+- [x] execute independent steps concurrently with `asyncio.gather`
+- [x] stop if required evidence is missing
+- [x] synthesize only after tool completion
+- [x] store execution plan in trace
 
 Do not create an unlimited autonomous loop.
 
@@ -607,6 +607,8 @@ This improves:
 - SQL accuracy
 - latency
 
+- [x] implemented schema linking with table descriptions, column descriptions, lexical matching, and embedding-score hook
+
 ---
 
 ## Task 10.2 — SQL Generation
@@ -619,6 +621,8 @@ class GeneratedSQL(BaseModel):
     explanation: str
 ```
 
+- [x] implemented structured SQL generation contract
+
 ---
 
 ## Task 10.3 — AST SQL Guard
@@ -627,16 +631,16 @@ Use a SQL parser.
 
 Requirements:
 
-- [ ] SELECT only
-- [ ] one statement
-- [ ] approved tables
-- [ ] approved schemas
-- [ ] row limit
-- [ ] timeout
-- [ ] block DDL
-- [ ] block DML
-- [ ] block unsafe functions
-- [ ] database connection uses read-only role
+- [x] SELECT only
+- [x] one statement
+- [x] approved tables
+- [x] approved schemas
+- [x] row limit
+- [x] timeout
+- [x] block DDL
+- [x] block DML
+- [x] block unsafe functions
+- [x] database connection uses read-only role
 
 ---
 
@@ -663,6 +667,8 @@ Important:
 - Never repair SQL that failed the safety validator.
 - Maximum one repair attempt.
 
+- [x] implemented one bounded repair attempt after execution errors only
+
 ---
 
 ## Task 10.5 — SQL Confidence
@@ -678,6 +684,8 @@ Return metadata:
 ```
 
 Low confidence should cause a cautious answer rather than pretending certainty.
+
+- [x] implemented SQL confidence metadata
 
 ---
 
@@ -706,6 +714,8 @@ tsvector lexical index
 
 Use embedding similarity with `pgvector`.
 
+- [x] implemented pgvector-compatible source chunk embedding column and dense retrieval query builder
+
 ---
 
 ## Task 11.2 — Lexical Retrieval
@@ -720,6 +730,8 @@ This catches exact:
 - unusual terms
 
 that semantic retrieval may miss.
+
+- [x] implemented PostgreSQL full-text search column and lexical retrieval query builder
 
 ---
 
@@ -738,6 +750,8 @@ using Reciprocal Rank Fusion.
 Return one combined candidate list.
 
 This is much stronger than simple cosine-similarity RAG.
+
+- [x] implemented reciprocal rank fusion for dense and lexical candidate lists
 
 ---
 
@@ -764,6 +778,8 @@ Record:
 - initial retrieval rank
 - reranked position
 - score
+
+- [x] implemented reranking boundary with rank, reranked position, and score metadata
 
 This demonstrates a real retrieval pipeline:
 
@@ -802,6 +818,8 @@ If evidence exceeds the budget:
 
 Track how many chunks/tokens were dropped.
 
+- [x] implemented context budgeting with section allocation, evidence trimming, and dropped token/chunk metadata
+
 ---
 
 # PHASE 14 — Conversation Memory
@@ -838,6 +856,8 @@ User: Why did the first one fall?
 
 The AI should understand that "the first one" refers to Electronics.
 
+- [x] implemented bounded conversation memory using recent turns, compressed summary, and selected sources
+
 ---
 
 # PHASE 15 — Semantic Cache
@@ -872,6 +892,8 @@ Do not cache:
 - security-sensitive prompts
 - low-confidence answers
 
+- [x] implemented semantic cache identity, compatibility checks, stats, and caching exclusions
+
 ---
 
 # PHASE 16 — Grounded Answer Generation
@@ -899,6 +921,8 @@ Rules:
 - citations must map to retrieved evidence
 - SQL claims must map to actual returned rows
 - admit when evidence is insufficient
+
+- [x] implemented grounded answer structured output, evidence checks, and insufficient-evidence fallback
 
 ---
 
