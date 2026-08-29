@@ -1,4 +1,5 @@
 from functools import lru_cache
+from decimal import Decimal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,6 +10,15 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     database_url: str = "postgresql+psycopg://retaildata_user:change-me@localhost:5432/retaildata_pro"
+    gemini_api_key: str | None = None
+    gemini_text_model: str = "gemini-3.5-flash-lite"
+    gemini_structured_model: str = "gemini-3.6-flash"
+    ai_provider_timeout_seconds: float = 30.0
+    ai_provider_max_retries: int = 2
+    gemini_35_flash_lite_input_cost_per_1m: Decimal = Decimal("0.30")
+    gemini_35_flash_lite_output_cost_per_1m: Decimal = Decimal("2.50")
+    gemini_36_flash_input_cost_per_1m: Decimal = Decimal("1.50")
+    gemini_36_flash_output_cost_per_1m: Decimal = Decimal("7.50")
 
     model_config = SettingsConfigDict(
         env_file=".env",

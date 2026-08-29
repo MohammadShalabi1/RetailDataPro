@@ -259,6 +259,10 @@ RetailData-Pro/
 
 # PHASE 2 — Build a Real Retail Data Model
 
+- [x] SQLAlchemy retail data model
+- [x] Alembic migration for retail tables and indexes
+- [x] deterministic Python seed generator
+
 Create:
 
 ```text
@@ -295,6 +299,14 @@ Create a Python seed generator that produces realistic relationships.
 
 # PHASE 3 — Deterministic Retail Analytics
 
+- [x] revenue API
+- [x] sales trends API
+- [x] top products API
+- [x] top customers API
+- [x] category performance API
+- [x] inventory API
+- [x] supplier performance API
+
 Before AI, build normal APIs for:
 
 - revenue
@@ -326,12 +338,12 @@ class AIProvider:
 
 Requirements:
 
-- [ ] timeout
-- [ ] transient retry
-- [ ] exponential backoff
-- [ ] usage metadata
-- [ ] latency metadata
-- [ ] provider-specific errors converted into internal errors
+- [x] timeout
+- [x] transient retry
+- [x] exponential backoff
+- [x] usage metadata
+- [x] latency metadata
+- [x] provider-specific errors converted into internal errors
 
 The rest of the project must not depend directly on the Gemini SDK.
 
@@ -346,7 +358,7 @@ Create:
 ```python
 class RouteCategory(str, Enum):
     conversation = "conversation"
-    retail_sql = "retail_sql"
+    retail_analytics = "retail_analytics"
     document_search = "document_search"
     website_search = "website_search"
     multi_source = "multi_source"
@@ -363,15 +375,21 @@ class ModelRoute(BaseModel):
 
 Requirements:
 
-- [ ] structured output
-- [ ] Pydantic validation
-- [ ] one repair retry
-- [ ] deterministic fallback
-- [ ] trace selected route
+- [x] structured output
+- [x] Pydantic validation
+- [x] one repair retry
+- [x] deterministic fallback
+- [x] trace selected route
 
 ---
 
 # PHASE 6 — Model Routing for Cost and Latency
+
+- [x] task-based model selection
+- [x] model selected metadata
+- [x] reason metadata
+- [x] token usage estimate metadata
+- [x] configurable Decimal cost estimates
 
 Do not use the same model for every task.
 
@@ -402,6 +420,12 @@ This shows that you understand AI systems as an engineering tradeoff, not merely
 
 # PHASE 7 — Agent Orchestration Boundary
 
+- [x] `run_turn(...)` orchestration boundary
+- [x] early input policy stage
+- [x] route-driven execution plan
+- [x] plan-driven model selection
+- [x] in-memory trace finalization
+
 Create:
 
 ```python
@@ -412,16 +436,16 @@ with stages:
 
 ```text
 load_context
-select_route
-select_model
 apply_input_policy
+select_route
 plan_execution
+select_model
 authorize_tools
 execute_tools
 build_context
 generate_answer
 validate_answer
-persist_trace
+finalize_trace
 ```
 
 Each stage should be a separate function.
@@ -436,6 +460,12 @@ Benefits:
 ---
 
 # PHASE 8 — Typed Tool Gateway
+
+- [x] typed tool registry
+- [x] typed tool gateway
+- [x] analytics_summary executable tool
+- [x] unavailable future tools registered safely
+- [x] authorization, timeout, validation, and trace metadata
 
 The model cannot directly execute functions.
 
