@@ -245,15 +245,15 @@ RetailData-Pro/
 
 ## Task 1.1 — Build the Application From Scratch
 
-- [ ] React + TypeScript frontend
-- [ ] FastAPI backend
-- [ ] PostgreSQL
-- [ ] SQLAlchemy
-- [ ] Alembic
-- [ ] clean service/repository separation
-- [ ] `.env` based configuration
-- [ ] no Gradio
-- [ ] no Docker
+- [x] React + TypeScript frontend
+- [x] FastAPI backend
+- [x] PostgreSQL
+- [x] SQLAlchemy
+- [x] Alembic
+- [x] clean service/repository separation
+- [x] `.env` based configuration
+- [x] no Gradio
+- [x] no Docker
 
 ---
 
