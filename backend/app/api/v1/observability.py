@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.security import require_development
 from app.services.observability_service import TraceRecord, observability_service
 
-router = APIRouter(prefix="/observability", tags=["observability"])
+router = APIRouter(prefix="/observability", tags=["observability"], dependencies=[Depends(require_development)])
 
 
 @router.get("/traces", response_model=list[TraceRecord])

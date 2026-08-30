@@ -14,7 +14,7 @@ from app.ai.hybrid_retrieval import HybridRetrievalService
 from app.database.session import get_db
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.retrieval_repository import RetrievalRepository
-from app.schemas.documents import DocumentCreateRequest, DocumentResponse, DocumentSearchResponse, DocumentSearchResult
+from app.schemas.documents import DocumentCreateRequest, DocumentListItem, DocumentResponse, DocumentSearchResponse, DocumentSearchResult
 
 DEFAULT_CHUNK_WORDS = 180
 MAX_SEARCH_LIMIT = 10
@@ -35,14 +35,14 @@ class DocumentService:
         self._retrieval_repository = retrieval_repository
         self._reranker = LexicalCrossEncoderReranker()
 
-    def create_document(self, request: DocumentCreateRequest) -> DocumentResponse:
+    def create_document(self, request: DocumentCreateRequest, client_id: str = "single-client") -> DocumentResponse:
         chunks = _chunk_text(request.content)
-        return self._repository.create_document(request.title, chunks, request.uri)
+        return self._repository.create_document(request.title, chunks, request.uri, client_id=client_id)
 
-    async def create_document_async(self, request: DocumentCreateRequest) -> DocumentResponse:
+    async def create_document_async(self, request: DocumentCreateRequest, client_id: str = "single-client") -> DocumentResponse:
         chunks = _chunk_text(request.content)
         embeddings = await self._embed_chunks(chunks)
-        return self._repository.create_document(request.title, chunks, request.uri, embeddings)
+        return self._repository.create_document(request.title, chunks, request.uri, embeddings, client_id)
 
     async def create_document_from_upload(
         self,
@@ -50,6 +50,7 @@ class DocumentService:
         filename: str,
         content_type: str | None,
         data: bytes,
+        client_id: str = "single-client",
     ) -> DocumentResponse:
         if len(data) > MAX_UPLOAD_BYTES:
             raise ValueError("Document uploads must be 10 MB or smaller.")
@@ -60,31 +61,46 @@ class DocumentService:
 
         chunks = _chunk_text(text)
         embeddings = await self._embed_chunks(chunks)
-        return self._repository.create_document(title, chunks, filename, embeddings)
+        return self._repository.create_document(title, chunks, filename, embeddings, client_id)
 
-    def search_documents(self, query: str, limit: int = 5, source_ids: list[str] | None = None) -> DocumentSearchResponse:
+    def list_documents(self, client_id: str = "single-client") -> list[DocumentListItem]:
+        return [DocumentListItem.model_validate(row) for row in self._repository.list_documents(client_id)]
+
+    def search_documents(
+        self,
+        query: str,
+        limit: int = 5,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> DocumentSearchResponse:
         resolved_limit = min(max(limit, 1), MAX_SEARCH_LIMIT)
-        scope = source_ids or []
+        scope = source_ids or self._repository.get_authorized_document_source_ids(client_id)
         if self._embedding_provider is not None and self._retrieval_repository is not None:
             raise RuntimeError("Use search_documents_async when hybrid retrieval is configured.")
-        lexical_results = self._repository.search_documents(query, resolved_limit, scope)
+        lexical_results = self._repository.search_documents(query, resolved_limit, scope, client_id)
         hybrid = reciprocal_rank_fusion([], [_to_retrieved_chunk(result, "lexical") for result in lexical_results], limit=resolved_limit)
         results = [_from_reranked_chunk(chunk) for chunk in self._reranker.rerank(query, hybrid.chunks, top_k=resolved_limit)]
         if not results:
-            results = self._repository.get_recent_document_chunks(resolved_limit, scope)
+            results = self._repository.get_recent_document_chunks(resolved_limit, scope, client_id)
         return DocumentSearchResponse(query=query, results=results, source_ids=scope, confidence=0.45 if results else 0.0)
 
-    async def search_documents_async(self, query: str, limit: int = 5, source_ids: list[str] | None = None) -> DocumentSearchResponse:
+    async def search_documents_async(
+        self,
+        query: str,
+        limit: int = 5,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> DocumentSearchResponse:
         resolved_limit = min(max(limit, 1), MAX_SEARCH_LIMIT)
-        requested_scope = source_ids or []
+        requested_scope = source_ids or self._repository.get_authorized_document_source_ids(client_id)
         if not requested_scope:
             return DocumentSearchResponse(
                 query=query,
                 results=[],
                 source_ids=[],
-                limitations=["No authorized document sources were provided."],
+                limitations=["No client documents are available yet."],
             )
-        allowed_scope, rejected_scope = self._repository.authorize_source_ids(requested_scope)
+        allowed_scope, rejected_scope = self._repository.authorize_source_ids(requested_scope, client_id)
         if rejected_scope or not allowed_scope:
             return DocumentSearchResponse(
                 query=query,

@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     app_name: str = "RetailData-Pro API"
     app_env: str = "development"
     api_cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    private_client_id: str = "single-client"
+    allow_dev_client_header: bool = True
     database_url: str = "postgresql+psycopg://retaildata_user:change-me@localhost:5432/retaildata_pro"
     readonly_database_url: str | None = None
     gemini_api_key: str | None = None
@@ -51,6 +53,10 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.app_env.lower() == "development"
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() == "production"
 
     @property
     def database_configured(self) -> bool:

@@ -161,12 +161,15 @@ async def execute_document_search(
     source_ids = parsed_input.source_ids or context.document_source_ids
     if context.document_service is None:
         return DocumentSearchOutput(query=parsed_input.question, chunks=[])
-    if hasattr(context.document_service, "search_documents_async"):
-        response = await context.document_service.search_documents_async(parsed_input.question, parsed_input.limit, source_ids)
-    else:
-        response = context.document_service.search_documents(parsed_input.question, parsed_input.limit, source_ids)
-        if inspect.isawaitable(response):
-            response = await response
+    response = _call_document_search(
+        context.document_service,
+        parsed_input.question,
+        parsed_input.limit,
+        source_ids,
+        context.client_id,
+    )
+    if inspect.isawaitable(response):
+        response = await response
     return DocumentSearchOutput(
         query=response.query,
         chunks=[result.model_dump(mode="json") for result in response.results],
@@ -186,3 +189,15 @@ def _ensure_document_input(tool_input: BaseModel) -> DocumentSearchInput:
     if isinstance(tool_input, DocumentSearchInput):
         return tool_input
     return DocumentSearchInput.model_validate(tool_input)
+
+
+def _call_document_search(document_service: Any, question: str, limit: int, source_ids: list[str], client_id: str) -> Any:
+    method = (
+        document_service.search_documents_async
+        if hasattr(document_service, "search_documents_async")
+        else document_service.search_documents
+    )
+    parameters = inspect.signature(method).parameters
+    if "client_id" in parameters or len(parameters) >= 4:
+        return method(question, limit, source_ids, client_id)
+    return method(question, limit, source_ids)

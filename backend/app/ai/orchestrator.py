@@ -46,6 +46,7 @@ class AgentTurnRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4_000)
     conversation_id: str | None = None
     document_source_ids: list[str] = Field(default_factory=list, max_length=10)
+    recent_messages: list[dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 class AgentTurnResult(BaseModel):
@@ -59,6 +60,7 @@ class AgentTurnResult(BaseModel):
     trace: OrchestrationTrace
     confidence: float = Field(ge=0.0, le=1.0)
     limitations: list[str] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GroundingPayload(BaseModel):
@@ -79,6 +81,7 @@ class AgentDependencies:
     analytics_service: Any | None = None
     document_service: Any | None = None
     user_role: str = "analyst"
+    client_id: str = "single-client"
 
     def router(self) -> TypedRouter:
         return self.typed_router or TypedRouter(self.ai_provider)
@@ -113,12 +116,13 @@ async def run_turn(request: AgentTurnRequest, dependencies: AgentDependencies) -
         trace=trace,
         confidence=validated_answer["confidence"],
         limitations=validated_answer["limitations"],
+        citations=validated_answer.get("citations", []),
     )
 
 
 def load_context(request: AgentTurnRequest, trace: OrchestrationTrace) -> dict[str, Any]:
-    context = {"conversation_id": request.conversation_id, "recent_messages": []}
-    trace.record({"stage": "load_context", "status": "ok", "recent_message_count": 0})
+    context = {"conversation_id": request.conversation_id, "recent_messages": request.recent_messages[-12:]}
+    trace.record({"stage": "load_context", "status": "ok", "recent_message_count": len(context["recent_messages"])})
     return context
 
 
@@ -223,6 +227,7 @@ async def execute_tools(
         analytics_service=dependencies.analytics_service,
         document_service=dependencies.document_service,
         document_source_ids=request.document_source_ids,
+        client_id=dependencies.client_id,
         trace=trace,
     )
     results = await asyncio.gather(
@@ -306,11 +311,12 @@ async def generate_answer(
                 ),
                 "confidence": min(route.confidence, 0.4),
                 "limitations": limitations,
+                "citations": [],
             }
 
         try:
             grounded = await dependencies.grounded_generator().generate(
-                request.question,
+                _grounded_question(request, answer_context),
                 GroundingEvidence(
                     tool_results=grounding_payload.tool_results,
                     retrieved_chunks=grounding_payload.retrieved_chunks,
@@ -331,6 +337,7 @@ async def generate_answer(
                 "answer": grounded.answer,
                 "confidence": min(route.confidence, grounded.confidence),
                 "limitations": [*limitations, *grounded.limitations],
+                "citations": [citation.model_dump(mode="json") for citation in grounded.citations],
             }
         except AIProviderError as exc:
             trace.record(
@@ -348,6 +355,7 @@ async def generate_answer(
                 "answer": synthesized,
                 "confidence": min(route.confidence, 0.5),
                 "limitations": [*limitations, "Grounded answer generation failed after evidence collection."],
+                "citations": [],
             }
 
     try:
@@ -365,13 +373,14 @@ async def generate_answer(
                 "output_tokens": response.output_tokens,
             }
         )
-        return {"answer": response.content, "confidence": route.confidence, "limitations": []}
+        return {"answer": response.content, "confidence": route.confidence, "limitations": [], "citations": []}
     except AIProviderError:
         trace.record({"stage": "generate_answer", "status": "fallback", "reason": "provider_error"})
         return {
             "answer": "I could not generate an AI response right now. Please try again shortly.",
             "confidence": 0.2,
             "limitations": ["The AI provider failed during answer generation."],
+            "citations": [],
         }
 
 
@@ -396,6 +405,7 @@ def _blocked_result(policy: InputPolicyDecision, trace: OrchestrationTrace) -> A
         trace=trace,
         confidence=1.0,
         limitations=[policy.reason],
+        citations=[],
     )
 
 
@@ -405,6 +415,16 @@ def _conversation_prompt(question: str, answer_context: dict[str, Any]) -> str:
         f"Available context: {answer_context}\n"
         f"Question: {question}"
     )
+
+
+def _grounded_question(request: AgentTurnRequest, answer_context: dict[str, Any]) -> str:
+    recent = answer_context.get("loaded_context", {}).get("recent_messages", [])
+    if not recent:
+        return request.question
+    compact_history = "\n".join(
+        f"{message.get('role', 'user')}: {message.get('content', '')[:500]}" for message in recent[-6:]
+    )
+    return f"Conversation so far:\n{compact_history}\n\nCurrent question: {request.question}"
 
 
 def _tool_input_for_step(request: AgentTurnRequest, step: PlanStep) -> dict[str, Any]:

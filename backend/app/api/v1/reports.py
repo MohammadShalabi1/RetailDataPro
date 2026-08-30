@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.core.security import require_development
 from app.services.insight_service import RetailInsightService
 from app.services.observability_service import TraceRecord, observability_service
 from app.services.report_service import ExecutiveReport, ExecutiveReportService
 
-router = APIRouter(prefix="/reports", tags=["reports"])
+router = APIRouter(prefix="/reports", tags=["reports"], dependencies=[Depends(require_development)])
 
 
 @router.post("/weekly-brief", response_model=ExecutiveReport)

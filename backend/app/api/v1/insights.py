@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.core.security import require_development
 from app.services.insight_service import InsightResponse, RetailInsightService
 from app.services.observability_service import TraceRecord, observability_service
 
-router = APIRouter(prefix="/insights", tags=["insights"])
+router = APIRouter(prefix="/insights", tags=["insights"], dependencies=[Depends(require_development)])
 
 
 @router.post("/generate", response_model=InsightResponse)

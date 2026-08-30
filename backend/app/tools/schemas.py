@@ -30,6 +30,7 @@ class ToolExecutionRequest(BaseModel):
 
 class ToolExecutionContext(BaseModel):
     user_role: str = "analyst"
+    client_id: str = "single-client"
     trace: Any | None = None
     analytics_service: Any | None = None
     document_service: Any | None = None

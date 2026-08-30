@@ -21,10 +21,12 @@ class DocumentRepository:
         chunks: list[str],
         uri: str | None = None,
         embeddings: list[list[float]] | None = None,
+        client_id: str = "single-client",
     ) -> DocumentResponse:
         if uri:
-            self._delete_existing_document_versions(uri)
+            self._delete_existing_document_versions(uri, client_id)
         source = Source(
+            client_id=client_id,
             title=title,
             source_type="document",
             uri=uri,
@@ -52,10 +54,40 @@ class DocumentRepository:
             uploaded_at=source.uploaded_at,
         )
 
-    def search_documents(self, query: str, limit: int, source_ids: list[str] | None = None) -> list[DocumentSearchResult]:
-        return [_to_result(row, index) for index, row in enumerate(self._fetch_all(self.build_search_statement(query, limit, source_ids)), start=1)]
+    def list_documents(self, client_id: str) -> list[dict[str, Any]]:
+        rows = self._db.execute(
+            select(
+                cast(Source.id, String).label("source_id"),
+                Source.title,
+                Source.uploaded_at,
+                func.count(SourceChunk.id).label("chunk_count"),
+            )
+            .select_from(Source)
+            .join(SourceChunk, SourceChunk.source_id == Source.id, isouter=True)
+            .where(Source.client_id == client_id, Source.source_type == "document")
+            .group_by(Source.id, Source.title, Source.uploaded_at)
+            .order_by(Source.uploaded_at.desc())
+        ).all()
+        return [dict(row._mapping) for row in rows]
 
-    def get_recent_document_chunks(self, limit: int, source_ids: list[str] | None = None) -> list[DocumentSearchResult]:
+    def search_documents(
+        self,
+        query: str,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> list[DocumentSearchResult]:
+        return [
+            _to_result(row, index)
+            for index, row in enumerate(self._fetch_all(self.build_search_statement(query, limit, source_ids, client_id)), start=1)
+        ]
+
+    def get_recent_document_chunks(
+        self,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> list[DocumentSearchResult]:
         statement = (
             select(
                 cast(Source.id, String).label("source_id"),
@@ -67,13 +99,19 @@ class DocumentRepository:
             )
             .select_from(SourceChunk)
             .join(Source, Source.id == SourceChunk.source_id)
-            .where(*self._scope_filters(source_ids))
+            .where(*self._scope_filters(source_ids, client_id))
             .order_by(Source.uploaded_at.desc(), SourceChunk.chunk_index)
             .limit(limit)
         )
         return [_to_result(row, index) for index, row in enumerate(self._fetch_all(statement), start=1)]
 
-    def build_search_statement(self, query: str, limit: int, source_ids: list[str] | None = None) -> Select:
+    def build_search_statement(
+        self,
+        query: str,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> Select:
         tsquery = func.plainto_tsquery("english", query)
         rank = func.coalesce(func.ts_rank(SourceChunk.search_vector, tsquery), 0).label("score")
         return (
@@ -88,7 +126,7 @@ class DocumentRepository:
             .select_from(SourceChunk)
             .join(Source, Source.id == SourceChunk.source_id)
             .where(
-                *self._scope_filters(source_ids),
+                *self._scope_filters(source_ids, client_id),
                 or_(SourceChunk.search_vector.op("@@")(tsquery), SourceChunk.content.ilike(f"%{query}%")),
             )
             .order_by(desc("score"), Source.uploaded_at.desc(), SourceChunk.chunk_index)
@@ -98,27 +136,41 @@ class DocumentRepository:
     def _fetch_all(self, statement: Select) -> list[dict[str, Any]]:
         return [dict(row._mapping) for row in self._db.execute(statement).all()]
 
-    def authorize_source_ids(self, source_ids: list[str]) -> tuple[list[str], list[str]]:
+    def authorize_source_ids(self, source_ids: list[str], client_id: str = "single-client") -> tuple[list[str], list[str]]:
         parsed = [str(value) for value in source_ids if _parse_uuid(value) is not None]
         if not parsed:
             return [], [value for value in source_ids if _parse_uuid(value) is None]
         rows = self._db.scalars(
-            select(cast(Source.id, String)).where(Source.source_type == "document", cast(Source.id, String).in_(parsed))
+            select(cast(Source.id, String)).where(
+                Source.client_id == client_id,
+                Source.source_type == "document",
+                cast(Source.id, String).in_(parsed),
+            )
         ).all()
         allowed = [str(row) for row in rows]
         rejected = [value for value in source_ids if value not in allowed]
         return allowed, rejected
 
-    def _scope_filters(self, source_ids: list[str] | None = None) -> list[Any]:
-        filters: list[Any] = [Source.source_type == "document"]
+    def get_authorized_document_source_ids(self, client_id: str) -> list[str]:
+        return [
+            str(value)
+            for value in self._db.scalars(
+                select(Source.id).where(Source.client_id == client_id, Source.source_type == "document")
+            ).all()
+        ]
+
+    def _scope_filters(self, source_ids: list[str] | None = None, client_id: str = "single-client") -> list[Any]:
+        filters: list[Any] = [Source.client_id == client_id, Source.source_type == "document"]
         parsed_ids = [_parse_uuid(value) for value in source_ids or []]
         scoped_ids = [value for value in parsed_ids if value is not None]
         if scoped_ids:
             filters.append(Source.id.in_(scoped_ids))
         return filters
 
-    def _delete_existing_document_versions(self, uri: str) -> None:
-        existing_ids = self._db.scalars(select(Source.id).where(Source.source_type == "document", Source.uri == uri)).all()
+    def _delete_existing_document_versions(self, uri: str, client_id: str) -> None:
+        existing_ids = self._db.scalars(
+            select(Source.id).where(Source.client_id == client_id, Source.source_type == "document", Source.uri == uri)
+        ).all()
         if existing_ids:
             self._db.query(Source).filter(Source.id.in_(existing_ids)).delete(synchronize_session=False)
 

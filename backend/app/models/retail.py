@@ -180,9 +180,13 @@ class InventoryEvent(TimestampMixin, Base):
 
 class Source(TimestampMixin, Base):
     __tablename__ = "sources"
-    __table_args__ = (Index("ix_sources_type_uploaded_at", "source_type", "uploaded_at"),)
+    __table_args__ = (
+        Index("ix_sources_type_uploaded_at", "source_type", "uploaded_at"),
+        Index("ix_sources_client_type_uploaded", "client_id", "source_type", "uploaded_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[str] = mapped_column(String(80), nullable=False, default="single-client", index=True)
     title: Mapped[str] = mapped_column(String(220), nullable=False)
     source_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -220,9 +224,13 @@ class SourceChunk(TimestampMixin, Base):
 
 class Conversation(TimestampMixin, Base):
     __tablename__ = "conversations"
-    __table_args__ = (Index("ix_conversations_customer_updated", "customer_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_conversations_customer_updated", "customer_id", "updated_at"),
+        Index("ix_conversations_client_last_message", "client_id", "last_message_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[str] = mapped_column(String(80), nullable=False, default="single-client", index=True)
     customer_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("customers.id", ondelete="SET NULL"),
@@ -231,6 +239,7 @@ class Conversation(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(220), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     customer: Mapped[Customer | None] = relationship(back_populates="conversations")
     messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")

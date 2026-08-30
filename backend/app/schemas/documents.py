@@ -18,6 +18,13 @@ class DocumentResponse(BaseModel):
     uploaded_at: datetime
 
 
+class DocumentListItem(BaseModel):
+    source_id: str
+    title: str
+    uploaded_at: datetime
+    chunk_count: int
+
+
 class DocumentSearchResult(BaseModel):
     source_id: str
     chunk_id: str

@@ -1,196 +1,398 @@
-import { ChangeEvent, DragEvent, FormEvent, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
-  BarChart3,
-  Boxes,
-  ClipboardList,
-  Database,
-  FileSearch,
-  Gauge,
-  Home,
+  AlertCircle,
+  FileText,
+  Loader2,
   MessageSquare,
-  Upload,
+  MoreHorizontal,
+  Pencil,
+  Plus,
   Search,
   Send,
-  ShieldCheck,
-  Timer,
+  Sparkles,
+  Trash2,
+  Upload,
 } from 'lucide-react';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import { Link } from 'react-router-dom';
-
-import { ChatResponse, useChatMutation } from './api/chat';
-import { useCreateDocumentMutation, useUploadDocumentMutation } from './api/documents';
-import { useLatestEvaluationQuery } from './api/evaluations';
+  ClientMessage,
+  ConversationSummary,
+  useConversationQuery,
+  useConversationsQuery,
+  useCreateConversationMutation,
+  useDeleteConversationMutation,
+  useRenameConversationMutation,
+  useSendMessageMutation,
+} from './api/conversations';
+import { useCreateDocumentMutation, useDocumentsQuery, useUploadDocumentMutation } from './api/documents';
 import { useHealthQuery } from './api/health';
-import { useTracesQuery } from './api/observability';
 
-type AppProps = {
-  view?: 'overview' | 'traces' | 'evaluations';
-};
-
-type ChatMessage = {
-  role: 'user' | 'assistant';
+type PendingUserMessage = {
+  id: string;
+  role: 'user';
   content: string;
-  response?: ChatResponse;
+  created_at: string;
+  citations: [];
+  status: 'complete';
 };
 
-const pieColors = ['#0f8b84', '#f2b84b', '#d65a50', '#96a3ad'];
+const EXAMPLE_PROMPTS = [
+  'Which suppliers had the weakest fulfillment reliability?',
+  'Which categories are losing revenue?',
+  'What does the supplier report say about inventory risk?',
+  'Compare database sales with uploaded supplier documentation.',
+];
 
-export function App({ view = 'overview' }: AppProps) {
+export function App() {
+  const { conversationId } = useParams();
+  const navigate = useNavigate();
+  const conversationsQuery = useConversationsQuery();
+  const conversationQuery = useConversationQuery(conversationId);
   const healthQuery = useHealthQuery();
+  const createConversation = useCreateConversationMutation();
+  const deleteConversation = useDeleteConversationMutation();
+  const [isDocumentsOpen, setIsDocumentsOpen] = useState(false);
+
+  async function startConversation() {
+    const conversation = await createConversation.mutateAsync();
+    navigate(`/chat/${conversation.id}`);
+  }
+
+  async function deleteActiveConversation(id: string) {
+    const confirmed = window.confirm('Delete this chat? This cannot be undone.');
+    if (!confirmed) {
+      return;
+    }
+    await deleteConversation.mutateAsync(id);
+    navigate('/');
+  }
 
   return (
-    <main className="admin-shell">
-      <Sidebar active={view} />
-      <section className="admin-main">
-        <header className="admin-header">
+    <main className="app-shell">
+      <Sidebar
+        activeConversationId={conversationId}
+        conversations={conversationsQuery.data ?? []}
+        isLoading={conversationsQuery.isLoading}
+        isCreating={createConversation.isPending}
+        onNewChat={startConversation}
+        onOpenDocuments={() => setIsDocumentsOpen((value) => !value)}
+      />
+      <section className="workspace">
+        <header className="topbar">
           <div>
-            <h1>{view === 'evaluations' ? 'Evaluation Dashboard' : view === 'traces' ? 'AI Trace Viewer' : 'RetailData-Pro Chat'}</h1>
-            <p>Ask the AI retail intelligence agent and inspect its operational trace.</p>
+            <h1>RetailData-Pro AI Assistant</h1>
+            <p>Ask about sales, suppliers, inventory, or uploaded reports.</p>
           </div>
-          <div className="header-actions">
-            <div className="search-box">
-              <Search size={16} aria-hidden="true" />
-              <span>Search traces, queries, sessions...</span>
-            </div>
-            <div className="api-status" data-state={healthQuery.data?.status ?? 'loading'}>
-              <Activity size={16} aria-hidden="true" />
-              <span>{healthQuery.isLoading ? 'Checking API' : healthQuery.data?.status ?? 'Unavailable'}</span>
-            </div>
+          <div className="service-status" data-state={healthQuery.data?.status === 'ok' ? 'ok' : 'checking'}>
+            <span />
+            {healthQuery.isLoading ? 'Checking connection' : healthQuery.data?.status === 'ok' ? 'Operational' : 'Unavailable'}
           </div>
         </header>
 
-        {view === 'evaluations' ? <EvaluationDashboard /> : view === 'traces' ? <TraceViewer /> : <ChatWorkspace />}
+        <div className="content-grid" data-documents-open={isDocumentsOpen}>
+          <ChatPage
+            conversationId={conversationId}
+            conversation={conversationQuery.data}
+            isLoading={conversationQuery.isLoading}
+            isError={conversationQuery.isError}
+            onCreateConversation={startConversation}
+            onDeleteConversation={deleteActiveConversation}
+            onOpenDocuments={() => setIsDocumentsOpen(true)}
+          />
+          {isDocumentsOpen ? <DocumentPanel /> : null}
+        </div>
       </section>
     </main>
   );
 }
 
-function Sidebar({ active }: { active: AppProps['view'] }) {
+function Sidebar({
+  activeConversationId,
+  conversations,
+  isLoading,
+  isCreating,
+  onNewChat,
+  onOpenDocuments,
+}: {
+  activeConversationId?: string;
+  conversations: ConversationSummary[];
+  isLoading: boolean;
+  isCreating: boolean;
+  onNewChat: () => void;
+  onOpenDocuments: () => void;
+}) {
   return (
     <aside className="sidebar">
-      <div className="brand-block">
-        <Database size={26} aria-hidden="true" />
+      <div className="brand">
+        <div className="brand-mark" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
         <div>
           <strong>RetailData-Pro</strong>
-          <span>AI Retail Intelligence</span>
+          <small>Private retail assistant</small>
         </div>
       </div>
-      <nav aria-label="Admin navigation">
-        <Link className={active === 'overview' ? 'active' : ''} to="/">
-          <Home size={18} aria-hidden="true" />
-          Chat
-        </Link>
-        <Link className={active === 'traces' ? 'active' : ''} to="/admin/traces">
-          <FileSearch size={18} aria-hidden="true" />
-          AI Trace Viewer
-        </Link>
-        <Link className={active === 'evaluations' ? 'active' : ''} to="/admin/evaluations">
-          <BarChart3 size={18} aria-hidden="true" />
-          Evaluation Dashboard
-        </Link>
+
+      <button className="new-chat-button" type="button" onClick={onNewChat} disabled={isCreating}>
+        {isCreating ? <Loader2 size={18} aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+        New Chat
+      </button>
+
+      <button className="sidebar-tool-button" type="button" onClick={onOpenDocuments}>
+        <Upload size={17} aria-hidden="true" />
+        Documents
+      </button>
+
+      <div className="history-header">
+        <MessageSquare size={16} aria-hidden="true" />
+        <span>Chat History</span>
+      </div>
+
+      <nav className="history-list" aria-label="Chat history">
+        {isLoading ? <p className="sidebar-note">Loading chats...</p> : null}
+        {!isLoading && conversations.length === 0 ? <p className="sidebar-note">No chats yet.</p> : null}
+        {conversations.map((conversation) => (
+          <Link
+            className={conversation.id === activeConversationId ? 'history-item active' : 'history-item'}
+            to={`/chat/${conversation.id}`}
+            key={conversation.id}
+          >
+            <span>{conversation.title}</span>
+            <time>{formatRelativeDate(conversation.last_message_at ?? conversation.updated_at)}</time>
+          </Link>
+        ))}
       </nav>
-      <div className="sidebar-foot">No provider keys or hidden chain-of-thought are exposed.</div>
     </aside>
   );
 }
 
-function ChatWorkspace() {
-  const [question, setQuestion] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [activeDocumentSourceIds, setActiveDocumentSourceIds] = useState<string[]>([]);
-  const chatMutation = useChatMutation();
+function ChatPage({
+  conversationId,
+  conversation,
+  isLoading,
+  isError,
+  onCreateConversation,
+  onDeleteConversation,
+  onOpenDocuments,
+}: {
+  conversationId?: string;
+  conversation?: { title: string; messages: ClientMessage[] };
+  isLoading: boolean;
+  isError: boolean;
+  onCreateConversation: () => void;
+  onDeleteConversation: (conversationId: string) => void;
+  onOpenDocuments: () => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [pendingMessage, setPendingMessage] = useState<PendingUserMessage | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const sendMessage = useSendMessageMutation(conversationId);
+  const renameConversation = useRenameConversationMutation();
 
-  async function submitQuestion(event: FormEvent<HTMLFormElement>) {
+  const messages = useMemo(() => {
+    const saved = conversation?.messages ?? [];
+    return pendingMessage ? [...saved, pendingMessage] : saved;
+  }, [conversation?.messages, pendingMessage]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [messages.length, sendMessage.isPending]);
+
+  useEffect(() => {
+    if (conversation?.title) {
+      setTitleDraft(conversation.title);
+    }
+  }, [conversation?.title]);
+
+  async function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const trimmed = question.trim();
-    if (!trimmed || chatMutation.isPending) {
+    const message = draft.trim();
+    if (!conversationId || !message || sendMessage.isPending) {
       return;
     }
 
-    setQuestion('');
-    setMessages((current) => [...current, { role: 'user', content: trimmed }]);
+    setSendError(null);
+    setDraft('');
+    setPendingMessage({
+      id: `pending-${Date.now()}`,
+      role: 'user',
+      content: message,
+      created_at: new Date().toISOString(),
+      citations: [],
+      status: 'complete',
+    });
+
     try {
-      const response = await chatMutation.mutateAsync({
-        question: trimmed,
-        document_source_ids: activeDocumentSourceIds,
-      });
-      setMessages((current) => [...current, { role: 'assistant', content: response.answer, response }]);
+      await sendMessage.mutateAsync({ message });
+      setPendingMessage(null);
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          role: 'assistant',
-          content: error instanceof Error ? error.message : 'The chat request failed.',
-        },
-      ]);
+      setSendError(error instanceof Error ? error.message : "I couldn't complete that request right now.");
+      setPendingMessage(null);
     }
   }
 
+  async function saveTitle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!conversationId || !titleDraft.trim()) {
+      return;
+    }
+    await renameConversation.mutateAsync({ conversationId, title: titleDraft.trim() });
+    setRenaming(false);
+  }
+
+  if (!conversationId) {
+    return <EmptyStart onCreateConversation={onCreateConversation} />;
+  }
+
+  if (isLoading) {
+    return <div className="chat-surface centered-state">Loading conversation...</div>;
+  }
+
+  if (isError || !conversation) {
+    return <div className="chat-surface centered-state">I couldn't load that chat. Please choose another conversation.</div>;
+  }
+
   return (
-    <section className="chat-layout">
-      <div className="chat-column">
-        <DocumentPanel onDocumentReady={(sourceId) => setActiveDocumentSourceIds([sourceId])} />
-        <div className="panel chat-panel">
-          <div className="chat-heading">
-            <MessageSquare size={20} aria-hidden="true" />
-            <div>
-              <h2>Retail intelligence chat</h2>
-              <p>Responses come from the backend orchestration endpoint.</p>
-            </div>
-          </div>
-          <div className="message-list" aria-live="polite">
-            {messages.length === 0 ? (
-              <div className="empty-state">
-                Ask a question to create a real chat response and trace record.
-              </div>
-            ) : (
-              messages.map((message, index) => (
-                <article className={`message ${message.role}`} key={`${message.role}-${index}`}>
-                  <span>{message.role}</span>
-                  <p>{message.content}</p>
-                  {message.response ? <ChatMetadata response={message.response} /> : null}
-                </article>
-              ))
-            )}
-          </div>
-          <form className="chat-form" onSubmit={submitQuestion}>
-            <input
-              aria-label="Ask RetailData-Pro"
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder="Ask about revenue, inventory, products, suppliers, or reports..."
-            />
-            <button type="submit" disabled={chatMutation.isPending || question.trim().length === 0}>
-              <Send size={17} aria-hidden="true" />
-              <span>{chatMutation.isPending ? 'Sending' : 'Send'}</span>
+    <section className="chat-surface">
+      <div className="chat-title-row">
+        {renaming ? (
+          <form className="rename-form" onSubmit={saveTitle}>
+            <input aria-label="Conversation title" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} />
+            <button type="submit" disabled={renameConversation.isPending}>
+              Save
             </button>
           </form>
+        ) : (
+          <div>
+            <h2>{conversation.title}</h2>
+            <p>{messages.length === 0 ? 'New conversation' : `${messages.length} messages`}</p>
+          </div>
+        )}
+        <div className="chat-actions">
+          <button type="button" onClick={() => setRenaming((value) => !value)} aria-label="Rename chat">
+            <Pencil size={17} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => onDeleteConversation(conversationId)} aria-label="Delete chat">
+            <Trash2 size={17} aria-hidden="true" />
+          </button>
         </div>
       </div>
-      <TraceViewer compact />
+
+      <div className="message-list" aria-live="polite">
+        {messages.length === 0 ? <PromptSuggestions onPromptClick={setDraft} /> : null}
+        {messages.map((message) => (
+          <MessageBubble message={message} key={message.id} />
+        ))}
+        {sendMessage.isPending ? <AssistantLoading /> : null}
+        <div ref={messagesEndRef} />
+      </div>
+
+      {sendError ? (
+        <div className="error-banner">
+          <AlertCircle size={17} aria-hidden="true" />
+          {sendError}
+        </div>
+      ) : null}
+
+      <form className="composer" onSubmit={submitMessage}>
+        <button type="button" aria-label="Open documents" onClick={onOpenDocuments}>
+          <Upload size={18} aria-hidden="true" />
+        </button>
+        <input
+          aria-label="Message RetailData-Pro AI Assistant"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder="Message RetailData-Pro AI Assistant..."
+        />
+        <button type="submit" disabled={sendMessage.isPending || draft.trim().length === 0} aria-label="Send message">
+          {sendMessage.isPending ? <Loader2 size={18} aria-hidden="true" /> : <Send size={18} aria-hidden="true" />}
+        </button>
+      </form>
     </section>
   );
 }
 
-function DocumentPanel({ onDocumentReady }: { onDocumentReady: (sourceId: string) => void }) {
+function EmptyStart({ onCreateConversation }: { onCreateConversation: () => void }) {
+  return (
+    <section className="chat-surface empty-chat">
+      <Sparkles size={28} aria-hidden="true" />
+      <h2>Ask about sales, suppliers, inventory, or uploaded reports.</h2>
+      <p>Select a previous chat from the sidebar or start a new one.</p>
+      <button type="button" onClick={onCreateConversation}>
+        <Plus size={18} aria-hidden="true" />
+        New Chat
+      </button>
+      <PromptSuggestions />
+    </section>
+  );
+}
+
+function PromptSuggestions({ onPromptClick }: { onPromptClick?: (prompt: string) => void }) {
+  return (
+    <div className="prompt-grid">
+      {EXAMPLE_PROMPTS.map((prompt) => (
+        <button type="button" onClick={() => onPromptClick?.(prompt)} key={prompt}>
+          {prompt}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MessageBubble({ message }: { message: ClientMessage | PendingUserMessage }) {
+  return (
+    <article className={`message ${message.role} ${message.status === 'failed' ? 'failed' : ''}`}>
+      <div className="message-avatar">{message.role === 'user' ? 'You' : <Sparkles size={16} aria-hidden="true" />}</div>
+      <div className="message-body">
+        <p>{message.content}</p>
+        {'citations' in message && message.citations.length > 0 ? (
+          <div className="citation-list" aria-label="Citations">
+            {message.citations.map((citation) => (
+              <div className="citation-card" key={`${citation.label}-${citation.claim ?? ''}`}>
+                <FileText size={16} aria-hidden="true" />
+                <div>
+                  <strong>{citation.label}</strong>
+                  {citation.claim ? <span>{citation.claim}</span> : null}
+                  {citation.excerpt ? <p>{citation.excerpt}</p> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function AssistantLoading() {
+  return (
+    <article className="message assistant loading">
+      <div className="message-avatar">
+        <Sparkles size={16} aria-hidden="true" />
+      </div>
+      <div className="message-body typing">
+        <span>RetailData-Pro is preparing an answer</span>
+        <i />
+        <i />
+        <i />
+      </div>
+    </article>
+  );
+}
+
+function DocumentPanel() {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
-  const [lastDocument, setLastDocument] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const documentsQuery = useDocumentsQuery();
   const createDocument = useCreateDocumentMutation();
   const uploadDocument = useUploadDocumentMutation();
   const isUploading = createDocument.isPending || uploadDocument.isPending;
@@ -201,7 +403,7 @@ function DocumentPanel({ onDocumentReady }: { onDocumentReady: (sourceId: string
     const lowerName = file.name.toLowerCase();
     const isAllowed = allowedExtensions.some((extension) => lowerName.endsWith(extension)) || file.type.startsWith('text/');
     if (!isAllowed) {
-      setFileError('Use a PDF or text file such as .txt, .md, .csv, or .json.');
+      setFileError('Use a PDF, TXT, Markdown, CSV, or JSON file.');
       return;
     }
     if (file.size > 10_000_000) {
@@ -210,15 +412,10 @@ function DocumentPanel({ onDocumentReady }: { onDocumentReady: (sourceId: string
     }
 
     const uploadTitle = file.name.replace(/\.[^/.]+$/, '');
-    setTitle(uploadTitle);
     try {
-      const response = await uploadDocument.mutateAsync({ title: uploadTitle, file });
-      setLastDocument(`${response.title} (${response.chunk_count} chunks)`);
-      onDocumentReady(response.source_id);
-      setTitle('');
-      setContent('');
+      await uploadDocument.mutateAsync({ title: uploadTitle, file });
     } catch (error) {
-      setFileError(error instanceof Error ? error.message : 'Document upload failed.');
+      setFileError(error instanceof Error ? error.message : "I couldn't upload that document right now.");
     }
   }
 
@@ -246,23 +443,27 @@ function DocumentPanel({ onDocumentReady }: { onDocumentReady: (sourceId: string
     if (!trimmedTitle || !trimmedContent || isUploading) {
       return;
     }
-    const response = await createDocument.mutateAsync({ title: trimmedTitle, content: trimmedContent });
-    setLastDocument(`${response.title} (${response.chunk_count} chunks)`);
-    onDocumentReady(response.source_id);
-    setTitle('');
-    setContent('');
+    try {
+      await createDocument.mutateAsync({ title: trimmedTitle, content: trimmedContent });
+      setTitle('');
+      setContent('');
+      setFileError(null);
+    } catch (error) {
+      setFileError(error instanceof Error ? error.message : "I couldn't add that document right now.");
+    }
   }
 
   return (
-    <form className="panel document-panel" onSubmit={submitDocument}>
-      <div className="chat-heading">
-        <Upload size={20} aria-hidden="true" />
+    <aside className="documents-panel">
+      <div className="panel-heading">
         <div>
-          <h2>Add document evidence</h2>
-          <p>Paste report text here before asking document questions.</p>
+          <h2>Documents</h2>
+          <p>Uploaded reports are available to this assistant.</p>
         </div>
+        <Search size={18} aria-hidden="true" />
       </div>
-      <div className="document-grid">
+
+      <form className="document-form" onSubmit={submitDocument}>
         <div
           className={`drop-zone${isDragging ? ' dragging' : ''}`}
           onDragEnter={(event) => {
@@ -274,234 +475,62 @@ function DocumentPanel({ onDocumentReady }: { onDocumentReady: (sourceId: string
           onDrop={handleDrop}
         >
           <Upload size={18} aria-hidden="true" />
-          <span>{uploadDocument.isPending ? 'Uploading and extracting document...' : 'Drop a PDF or text report to upload'}</span>
+          <span>{uploadDocument.isPending ? 'Uploading document...' : 'Drop a PDF or text report'}</span>
           <button type="button" onClick={() => fileInputRef.current?.click()}>
-            Choose file
+            Choose
           </button>
           <input
             ref={fileInputRef}
-            aria-label="Upload document file"
+            aria-label="Upload document"
             type="file"
             accept=".pdf,.txt,.md,.csv,.json,text/*,application/pdf"
             onChange={handleFileInput}
           />
         </div>
-        <input
-          aria-label="Document title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          placeholder="Supplier report title"
-        />
+
+        <input aria-label="Document title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Report title" />
         <textarea
           aria-label="Document content"
           value={content}
           onChange={(event) => setContent(event.target.value)}
-          placeholder="Paste report text, or choose a PDF/text file..."
+          placeholder="Paste report text..."
         />
-      </div>
-      <div className="document-actions">
         <button type="submit" disabled={isUploading || !title.trim() || !content.trim()}>
-          <Upload size={16} aria-hidden="true" />
-          <span>{createDocument.isPending ? 'Adding' : 'Add pasted text'}</span>
+          {createDocument.isPending ? 'Adding document' : 'Add pasted text'}
         </button>
-        {lastDocument ? <span>{lastDocument}</span> : null}
-        {fileError ? <span>{fileError}</span> : null}
-        {createDocument.isError || uploadDocument.isError ? <span>Document upload failed.</span> : null}
-      </div>
-    </form>
-  );
-}
+        {fileError ? <p className="form-error">{fileError}</p> : null}
+      </form>
 
-function ChatMetadata({ response }: { response: ChatResponse }) {
-  return (
-    <dl className="chat-meta">
-      <div>
-        <dt>Trace</dt>
-        <dd>{response.trace_id}</dd>
-      </div>
-      <div>
-        <dt>Route</dt>
-        <dd>{response.route ?? 'blocked'}</dd>
-      </div>
-      <div>
-        <dt>Model</dt>
-        <dd>{response.model ?? 'none'}</dd>
-      </div>
-      <div>
-        <dt>Confidence</dt>
-        <dd>{response.confidence.toFixed(2)}</dd>
-      </div>
-    </dl>
-  );
-}
-
-function TraceViewer({ compact = false }: { compact?: boolean }) {
-  const tracesQuery = useTracesQuery();
-  const traces = tracesQuery.data ?? [];
-  const trace = traces[0];
-
-  if (tracesQuery.isLoading) {
-    return <div className="panel">Loading trace metadata...</div>;
-  }
-
-  if (!trace) {
-    return <div className="panel empty-state">No trace records yet. Send a chat message to generate one.</div>;
-  }
-
-  const metricCards = [
-    { label: 'Confidence', value: trace.confidence.toFixed(2), icon: Gauge },
-    { label: 'Latency', value: `${trace.total_ms}ms`, icon: Timer },
-    { label: 'Tokens', value: `${trace.input_tokens + trace.output_tokens}`, icon: ClipboardList },
-    { label: 'Tool Calls', value: `${trace.tools.length}`, icon: Boxes },
-  ];
-
-  return (
-    <div className="dashboard-stack">
-      <section className="trace-summary panel">
-        <div>
-          <span className="label">Trace ID</span>
-          <strong>{trace.trace_id}</strong>
-        </div>
-        <div>
-          <span className="label">Route</span>
-          <strong>{trace.route}</strong>
-        </div>
-        <div>
-          <span className="label">Model</span>
-          <strong>{trace.model}</strong>
-        </div>
-        <div>
-          <span className="label">Cache</span>
-          <strong>{trace.cache_hit ? 'Hit' : 'Miss'}</strong>
-        </div>
-      </section>
-
-      {!compact ? (
-        <section className="metric-grid">
-          {metricCards.map((card) => (
-            <article className="metric-card" key={card.label}>
-              <card.icon size={18} aria-hidden="true" />
-              <span>{card.label}</span>
-              <strong>{card.value}</strong>
-            </article>
-          ))}
-        </section>
-      ) : null}
-
-      <section className={compact ? 'trace-layout compact' : 'trace-layout'}>
-        <div className="panel timeline-panel">
-          <h2>Trace Timeline</h2>
-          <ol className="timeline">
-            {trace.events.map((event, index) => (
-              <li key={`${event.stage}-${index}`}>
-                <span className="timeline-dot" />
-                <div>
-                  <strong>{String(event.stage)}</strong>
-                  <span>{String(event.status)}</span>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </div>
-        <div className="panel">
-          <h2>Tool Calls</h2>
-          {trace.tools.length === 0 ? (
-            <p className="muted">No tool calls recorded for this trace.</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Tool</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trace.tools.map((tool) => (
-                  <tr key={tool}>
-                    <td>{tool}</td>
-                    <td>recorded</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-        {!compact ? (
-          <div className="panel sql-panel">
-            <h2>Generated SQL</h2>
-            <pre>{trace.generated_sql ?? 'No generated SQL for this trace.'}</pre>
+      <div className="document-list">
+        {documentsQuery.isLoading ? <p>Loading documents...</p> : null}
+        {!documentsQuery.isLoading && (documentsQuery.data ?? []).length === 0 ? <p>No documents uploaded yet.</p> : null}
+        {(documentsQuery.data ?? []).map((document) => (
+          <div className="document-row" key={document.id}>
+            <FileText size={18} aria-hidden="true" />
+            <div>
+              <strong>{document.title}</strong>
+              <span>
+                {document.chunk_count} sections - {formatRelativeDate(document.uploaded_at)}
+              </span>
+            </div>
+            <MoreHorizontal size={17} aria-hidden="true" />
           </div>
-        ) : null}
-      </section>
-    </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
-function EvaluationDashboard() {
-  const evalQuery = useLatestEvaluationQuery();
-  const run = evalQuery.data;
-  const metrics = run?.metrics ?? [];
-  const chartMetrics = metrics.filter((metric) => metric.unit === 'percent');
-  const pieData = Object.entries(run?.breakdown ?? {}).map(([name, value]) => ({ name, value }));
-
-  if (evalQuery.isLoading) {
-    return <div className="panel">Loading evaluation metrics...</div>;
+function formatRelativeDate(value: string) {
+  const date = new Date(value);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (diffMs < dayMs) {
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
-
-  return (
-    <div className="dashboard-stack">
-      <section className="trace-summary panel">
-        <div>
-          <span className="label">Run ID</span>
-          <strong>{run?.run_id}</strong>
-        </div>
-        <div>
-          <span className="label">Rows Evaluated</span>
-          <strong>{run?.rows_evaluated}</strong>
-        </div>
-        <div>
-          <span className="label">Datasets</span>
-          <strong>{run?.datasets.length}</strong>
-        </div>
-      </section>
-
-      <section className="metric-grid">
-        {metrics.map((metric) => (
-          <article className="metric-card" key={metric.name}>
-            <ShieldCheck size={18} aria-hidden="true" />
-            <span>{metric.name}</span>
-            <strong>{metric.unit === 'percent' ? `${metric.value}%` : `${metric.value}s`}</strong>
-          </article>
-        ))}
-      </section>
-
-      <section className="eval-layout">
-        <div className="panel chart-panel">
-          <h2>Evaluation Metrics</h2>
-          <ResponsiveContainer width="100%" height={280}>
-            <BarChart data={chartMetrics}>
-              <CartesianGrid stroke="#e7ecef" />
-              <XAxis dataKey="name" tick={{ fontSize: 11 }} interval={0} />
-              <YAxis domain={[0, 100]} />
-              <Tooltip />
-              <Bar dataKey="value" fill="#0f8b84" radius={[6, 6, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="panel chart-panel">
-          <h2>Dataset Coverage</h2>
-          <ResponsiveContainer width="100%" height={280}>
-            <PieChart>
-              <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={62} outerRadius={96}>
-                {pieData.map((entry, index) => (
-                  <Cell key={entry.name} fill={pieColors[index % pieColors.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-      </section>
-    </div>
-  );
+  if (diffMs < dayMs * 7) {
+    return date.toLocaleDateString([], { weekday: 'short' });
+  }
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }

@@ -14,12 +14,8 @@ const router = createBrowserRouter([
     element: <App />,
   },
   {
-    path: '/admin/traces',
-    element: <App view="traces" />,
-  },
-  {
-    path: '/admin/evaluations',
-    element: <App view="evaluations" />,
+    path: '/chat/:conversationId',
+    element: <App />,
   },
 ]);
 

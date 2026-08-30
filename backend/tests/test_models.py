@@ -42,6 +42,8 @@ def test_analytics_indexes_are_present() -> None:
     assert "ix_inventory_events_product_occurred_at" in _index_names(metadata.tables["inventory_events"])
     assert "ix_source_chunks_source_chunk" in _index_names(metadata.tables["source_chunks"])
     assert "ix_ai_traces_route_model" in _index_names(metadata.tables["ai_traces"])
+    assert "ix_conversations_client_last_message" in _index_names(metadata.tables["conversations"])
+    assert "ix_sources_client_type_uploaded" in _index_names(metadata.tables["sources"])
 
 
 def _foreign_key_targets(table) -> set[str]:

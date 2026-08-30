@@ -19,7 +19,15 @@ class FakeDocumentRepository:
         self.recent_calls: list[int] = []
         self.search_scopes: list[list[str]] = []
 
-    def create_document(self, title: str, chunks: list[str], uri: str | None = None, embeddings=None) -> DocumentResponse:
+    def create_document(
+        self,
+        title: str,
+        chunks: list[str],
+        uri: str | None = None,
+        embeddings=None,
+        client_id: str = "single-client",
+    ) -> DocumentResponse:
+        del client_id
         self.created.append((title, chunks, uri))
         self.embeddings = embeddings
         return DocumentResponse(
@@ -29,7 +37,14 @@ class FakeDocumentRepository:
             uploaded_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
         )
 
-    def search_documents(self, query: str, limit: int, source_ids: list[str] | None = None) -> list[DocumentSearchResult]:
+    def search_documents(
+        self,
+        query: str,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> list[DocumentSearchResult]:
+        del client_id
         self.search_scopes.append(source_ids or [])
         return [
             DocumentSearchResult(
@@ -42,7 +57,13 @@ class FakeDocumentRepository:
             )
         ][:limit]
 
-    def get_recent_document_chunks(self, limit: int, source_ids: list[str] | None = None) -> list[DocumentSearchResult]:
+    def get_recent_document_chunks(
+        self,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> list[DocumentSearchResult]:
+        del client_id
         self.recent_calls.append(limit)
         return [
             DocumentSearchResult(
@@ -55,18 +76,31 @@ class FakeDocumentRepository:
             )
         ][:limit]
 
-    def authorize_source_ids(self, source_ids: list[str]) -> tuple[list[str], list[str]]:
+    def authorize_source_ids(self, source_ids: list[str], client_id: str = "single-client") -> tuple[list[str], list[str]]:
+        del client_id
         return source_ids, []
+
+    def get_authorized_document_source_ids(self, client_id: str = "single-client") -> list[str]:
+        del client_id
+        return ["src_1"]
 
 
 class EmptySearchDocumentRepository(FakeDocumentRepository):
-    def search_documents(self, query: str, limit: int, source_ids: list[str] | None = None) -> list[DocumentSearchResult]:
+    def search_documents(
+        self,
+        query: str,
+        limit: int,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> list[DocumentSearchResult]:
+        del client_id
         self.search_scopes.append(source_ids or [])
         return []
 
 
 class FakeDocumentService:
-    def create_document(self, request: DocumentCreateRequest) -> DocumentResponse:
+    def create_document(self, request: DocumentCreateRequest, client_id: str = "single-client") -> DocumentResponse:
+        del client_id
         return DocumentResponse(
             source_id="src_route",
             title=request.title,
@@ -74,8 +108,8 @@ class FakeDocumentService:
             uploaded_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
         )
 
-    async def create_document_async(self, request: DocumentCreateRequest) -> DocumentResponse:
-        return self.create_document(request)
+    async def create_document_async(self, request: DocumentCreateRequest, client_id: str = "single-client") -> DocumentResponse:
+        return self.create_document(request, client_id)
 
     async def create_document_from_upload(
         self,
@@ -83,7 +117,9 @@ class FakeDocumentService:
         filename: str,
         content_type: str | None,
         data: bytes,
+        client_id: str = "single-client",
     ) -> DocumentResponse:
+        del client_id
         assert filename
         assert content_type
         assert data
@@ -94,10 +130,23 @@ class FakeDocumentService:
             uploaded_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
         )
 
-    async def search_documents_async(self, query: str, limit: int = 5, source_ids: list[str] | None = None) -> DocumentSearchResponse:
-        return self.search_documents(query, limit, source_ids)
+    async def search_documents_async(
+        self,
+        query: str,
+        limit: int = 5,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> DocumentSearchResponse:
+        return self.search_documents(query, limit, source_ids, client_id)
 
-    def search_documents(self, query: str, limit: int = 5, source_ids: list[str] | None = None) -> DocumentSearchResponse:
+    def search_documents(
+        self,
+        query: str,
+        limit: int = 5,
+        source_ids: list[str] | None = None,
+        client_id: str = "single-client",
+    ) -> DocumentSearchResponse:
+        del client_id
         return DocumentSearchResponse(
             query=query,
             source_ids=source_ids or [],
