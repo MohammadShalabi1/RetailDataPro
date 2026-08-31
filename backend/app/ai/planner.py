@@ -81,6 +81,21 @@ class QueryPlanner:
             return self._multi_source_plan(question, route.category)
 
         if route.category is RouteCategory.retail_analytics:
+            if _needs_retail_sql(question):
+                return ExecutionPlan(
+                    route=route.category,
+                    model_task=ModelTask.structured_generation,
+                    requires_synthesis=True,
+                    steps=[
+                        PlanStep(
+                            id="retail_sql",
+                            kind=PlanStepKind.tool,
+                            tool_name=ToolName.retail_sql,
+                            goal="Run a safe read-only retail database query for custom analysis.",
+                            required=True,
+                        )
+                    ],
+                )
             return ExecutionPlan(
                 route=route.category,
                 model_task=ModelTask.analytics_answer,
@@ -129,12 +144,13 @@ class QueryPlanner:
 
     def _multi_source_plan(self, question: str, route: RouteCategory) -> ExecutionPlan:
         normalized = question.lower()
+        database_tool = ToolName.retail_sql if _needs_retail_sql(question) else ToolName.analytics_summary
         steps = [
             PlanStep(
-                id="retail_analytics",
+                id="retail_database",
                 kind=PlanStepKind.tool,
-                tool_name=ToolName.analytics_summary,
-                goal="Get deterministic retail analytics for the user question.",
+                tool_name=database_tool,
+                goal="Get retail database evidence for the user question.",
                 required=True,
             )
         ]
@@ -166,3 +182,49 @@ class QueryPlanner:
             requires_synthesis=True,
             steps=steps[:MAX_PLAN_STEPS],
         )
+
+
+def _needs_retail_sql(question: str) -> bool:
+    normalized = question.lower()
+    simple_summary_terms = {
+        "revenue",
+        "sales trend",
+        "sales trends",
+        "top products",
+        "top product",
+        "best selling",
+        "bestselling",
+        "top customers",
+        "top customer",
+        "category performance",
+        "categories losing revenue",
+        "supplier performance",
+        "suppliers performed",
+        "inventory",
+        "stock",
+    }
+    custom_sql_terms = {
+        "by channel",
+        "by city",
+        "by state",
+        "by segment",
+        "by supplier and category",
+        "per channel",
+        "per city",
+        "per segment",
+        "breakdown",
+        "group by",
+        "average order value by",
+        "margin by",
+        "gross margin by",
+        "compare channels",
+        "customer segment",
+        "repeat customers",
+        "basket",
+        "cohort",
+        "show me a table",
+        "list the",
+    }
+    if any(term in normalized for term in custom_sql_terms):
+        return True
+    return " by " in normalized and not any(term in normalized for term in simple_summary_terms)

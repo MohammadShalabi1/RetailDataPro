@@ -8,7 +8,7 @@ from app.ai.provider import AIProvider
 from app.ai.schemas import StructuredGenerationRequest
 from app.ai.sql.guard import SQLGuard
 from app.ai.sql.schema_linker import SchemaLinker
-from app.ai.sql.schemas import GeneratedSQL, SQLExecutionResult, SQLPipelineResult, SQLSafetyStatus
+from app.ai.sql.schemas import GeneratedSQL, SQLExecutionResult, SQLPipelineResult, SQLSafetyStatus, SchemaTable
 
 
 class TextToSQLPipeline:
@@ -24,10 +24,11 @@ class TextToSQLPipeline:
         self._db = db
         self._row_limit = row_limit
 
-    async def run(self, question: str) -> SQLPipelineResult:
+    async def run(self, question: str, row_limit: int | None = None) -> SQLPipelineResult:
+        resolved_row_limit = row_limit or self._row_limit
         schema = self._schema_linker.link(question)
-        generated = await self._generate(question, schema.table_names)
-        guard = SQLGuard(schema.table_names, row_limit=self._row_limit)
+        generated = await self._generate(question, schema.tables)
+        guard = SQLGuard(schema.table_names, row_limit=resolved_row_limit)
         validation = guard.validate(generated.sql)
         if not validation.is_valid:
             return SQLPipelineResult(
@@ -56,11 +57,16 @@ class TextToSQLPipeline:
             repair_attempted=repair_attempted,
         )
 
-    async def _generate(self, question: str, tables: set[str]) -> GeneratedSQL:
+    async def _generate(self, question: str, tables: list[SchemaTable]) -> GeneratedSQL:
         prompt = (
-            "Generate one read-only PostgreSQL SELECT statement for the retail database.\n"
+            "Generate exactly one read-only PostgreSQL SELECT statement for the RetailData-Pro database.\n"
             "Return only structured fields matching GeneratedSQL.\n"
-            f"Approved tables: {sorted(tables)}\n"
+            "Use only the approved public retail tables and columns listed below. "
+            "Never query internal or operational tables such as conversations, messages, ai_traces, sources, source_chunks, "
+            "metadata, prompts, traces, credentials, settings, or environment variables. "
+            "Never use DDL, DML, comments, multiple statements, unsafe functions, private schemas, or SQL that changes data. "
+            "Prefer bounded aggregations and include a safe LIMIT when returning row-level data.\n"
+            f"Approved tables and columns: {_schema_prompt(tables)}\n"
             f"Question: {question}"
         )
         response = await self._ai_provider.generate_structured(
@@ -71,7 +77,8 @@ class TextToSQLPipeline:
     async def _repair(self, question: str, sql: str, sanitized_error: str) -> GeneratedSQL:
         prompt = (
             "Repair this PostgreSQL SELECT only if the error is a normal execution mistake. "
-            "Do not use unsafe functions, DDL, DML, or unapproved tables.\n"
+            "Do not use unsafe functions, DDL, DML, multiple statements, private schemas, comments, internal tables, "
+            "or unapproved tables. Return only structured fields matching GeneratedSQL.\n"
             f"Question: {question}\n"
             f"SQL: {sql}\n"
             f"Sanitized error: {sanitized_error}"
@@ -98,3 +105,14 @@ class TextToSQLPipeline:
 
 def _sanitize_error(exc: Exception) -> str:
     return exc.__class__.__name__
+
+
+def _schema_prompt(tables: list[SchemaTable]) -> list[dict[str, object]]:
+    return [
+        {
+            "table": table.name,
+            "description": table.description,
+            "columns": table.columns,
+        }
+        for table in tables
+    ]

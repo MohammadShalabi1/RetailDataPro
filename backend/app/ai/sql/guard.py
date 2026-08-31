@@ -30,6 +30,8 @@ class SQLGuard:
         self._approved_schema = approved_schema
 
     def validate(self, sql: str) -> SQLValidationResult:
+        if _has_sql_comment(sql):
+            return self._invalid("comments_not_allowed")
         try:
             statements = parse(sql, read="postgres")
         except ParseError:
@@ -40,6 +42,9 @@ class SQLGuard:
 
         statement = statements[0]
         if not isinstance(statement, exp.Select):
+            return self._invalid("select_only")
+
+        if self._has_mutating_expression(statement):
             return self._invalid("select_only")
 
         tables = self._tables(statement)
@@ -86,6 +91,10 @@ class SQLGuard:
                 return True
         return False
 
+    def _has_mutating_expression(self, statement: exp.Expression) -> bool:
+        mutating_expression_names = {"Delete", "Drop", "Insert", "Update", "Create", "Alter", "Truncate"}
+        return any(node.__class__.__name__ in mutating_expression_names for node in statement.walk())
+
     def _with_safe_limit(self, statement: exp.Expression) -> exp.Expression:
         existing_limit = statement.args.get("limit")
         if existing_limit is None:
@@ -99,3 +108,7 @@ class SQLGuard:
         if current_limit > self._row_limit:
             return statement.limit(self._row_limit)
         return statement
+
+
+def _has_sql_comment(sql: str) -> bool:
+    return "--" in sql or "/*" in sql or "*/" in sql

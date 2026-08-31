@@ -98,6 +98,37 @@ def test_chat_endpoint_returns_client_safe_message_contract() -> None:
     assert "tool_results" not in str(body)
 
 
+def test_client_message_contract_excludes_internal_sql_metadata() -> None:
+    service = FakeConversationService()
+    app = create_app()
+    app.dependency_overrides[get_conversation_service] = lambda: service
+    client = TestClient(app)
+
+    try:
+        conversation_id = client.post("/api/conversations", json={}).json()["id"]
+        conversation = service.conversations["single-client"][conversation_id]
+        conversation.messages.append(
+            ClientMessage(
+                id=str(uuid4()),
+                conversation_id=conversation_id,
+                role="assistant",
+                content="Revenue by channel is strongest online.",
+                created_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
+                citations=[{"label": "Retail database", "claim": "Revenue by channel"}],
+            )
+        )
+        response = client.get(f"/api/conversations/{conversation_id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "Retail database" in str(body)
+    assert "select " not in str(body).lower()
+    assert "generated_sql" not in str(body)
+    assert "normalized_sql" not in str(body)
+
+
 def test_conversation_refresh_restore_contract() -> None:
     service = FakeConversationService()
     app = create_app()

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.ai.dependencies import get_ai_provider
 from app.ai.orchestrator import AgentDependencies, AgentTurnRequest, AgentTurnResult, run_turn
 from app.ai.provider import AIProvider
+from app.ai.sql.dependencies import get_text_to_sql_pipeline
+from app.ai.sql.pipeline import TextToSQLPipeline
 from app.database.session import get_db
 from app.repositories.conversation_repository import ConversationRepository
 from app.schemas.conversations import (
@@ -38,11 +40,13 @@ class ConversationService:
         ai_provider: AIProvider,
         analytics_service: AnalyticsService,
         document_service: DocumentService,
+        sql_pipeline: TextToSQLPipeline | None = None,
     ) -> None:
         self._repository = repository
         self._ai_provider = ai_provider
         self._analytics_service = analytics_service
         self._document_service = document_service
+        self._sql_pipeline = sql_pipeline
 
     def create_conversation(self, client_id: str, title: str | None = None) -> ConversationSummary:
         return _conversation_summary(self._repository.create_conversation(client_id, _clean_title(title) or "New chat"))
@@ -110,6 +114,7 @@ class ConversationService:
                     ai_provider=self._ai_provider,
                     analytics_service=self._analytics_service,
                     document_service=self._document_service,
+                    sql_pipeline=self._sql_pipeline,
                     client_id=client_id,
                 ),
             )
@@ -158,8 +163,9 @@ def get_conversation_service(
     ai_provider: AIProvider = Depends(get_ai_provider),
     analytics_service: AnalyticsService = Depends(get_analytics_service),
     document_service: DocumentService = Depends(get_document_service),
+    sql_pipeline: TextToSQLPipeline | None = Depends(get_text_to_sql_pipeline),
 ) -> ConversationService:
-    return ConversationService(ConversationRepository(db), ai_provider, analytics_service, document_service)
+    return ConversationService(ConversationRepository(db), ai_provider, analytics_service, document_service, sql_pipeline)
 
 
 def _conversation_summary(conversation: Any) -> ConversationSummary:
@@ -220,6 +226,9 @@ def _friendly_citations(result: AgentTurnResult) -> list[ClientCitation]:
         if source_id == "analytics_summary":
             citations.append(ClientCitation(label="Retail analytics", claim=claim))
             continue
+        if source_id == "retail_sql":
+            citations.append(ClientCitation(label="Retail database", claim=claim))
+            continue
         chunk = chunks.get((source_id, chunk_id))
         if chunk:
             page = int(chunk.get("chunk_index") or 0) + 1
@@ -243,6 +252,7 @@ def _to_trace_record(trace_id: str, result: AgentTurnResult) -> TraceRecord:
     model = result.model_selection.model if result.model_selection else "none"
     tool_results = [tool.model_dump(mode="json") for tool in result.tool_results]
     token_event = next((event for event in result.trace.events if event.get("stage") == "generate_answer"), {})
+    sql_event = next((event for event in result.trace.events if event.get("stage") == "retail_sql"), {})
     return TraceRecord(
         trace_id=trace_id,
         route=route,
@@ -257,6 +267,6 @@ def _to_trace_record(trace_id: str, result: AgentTurnResult) -> TraceRecord:
         input_tokens=int(token_event.get("input_tokens") or 0),
         output_tokens=int(token_event.get("output_tokens") or 0),
         confidence=result.confidence,
-        generated_sql=None,
+        generated_sql=sql_event.get("normalized_sql") or sql_event.get("generated_sql"),
         events=result.trace.events,
     )

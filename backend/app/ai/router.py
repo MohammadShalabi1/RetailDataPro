@@ -90,7 +90,8 @@ def build_route_prompt(question: str) -> str:
         "confidence: number from 0.0 to 1.0, "
         "reason_code: general_conversation|retail_metric|retail_entity|document_reference|web_reference|mixed_sources}.\n"
         "Use retail_analytics for deterministic retail metrics, sales, inventory, customer, product, category, "
-        "or supplier analytics. Do not use a SQL route because text-to-SQL is not implemented yet.\n"
+        "supplier analytics, or custom retail database analysis. Text-to-SQL is handled internally after routing; "
+        "do not invent a SQL route category.\n"
         "Use multi_source when the question needs both retail analytics and document or web evidence.\n"
         f"Question: {question}"
     )

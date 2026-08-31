@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 from app.schemas.analytics import RevenueResponse
+from app.ai.sql.schemas import GeneratedSQL, SQLExecutionResult, SQLPipelineResult, SQLSafetyStatus, SQLValidationResult
 from app.tools.gateway import authorize_and_execute_tool
 from app.tools.registry import ToolDefinition, ToolRegistry, build_default_tool_registry
 from app.tools.schemas import ToolExecutionContext, ToolExecutionRequest, ToolName, ToolStatus
@@ -70,6 +71,16 @@ class SlowOutput(BaseModel):
     ok: bool
 
 
+class FakeSQLPipeline:
+    def __init__(self, result: SQLPipelineResult) -> None:
+        self.result = result
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def run(self, question: str, row_limit: int | None = None) -> SQLPipelineResult:
+        self.calls.append((question, row_limit))
+        return self.result
+
+
 async def slow_executor(tool_input: BaseModel, context: ToolExecutionContext) -> SlowOutput:
     await asyncio.sleep(0.05)
     return SlowOutput(ok=True)
@@ -105,12 +116,42 @@ async def test_unavailable_tools_do_not_execute() -> None:
     result = await authorize_and_execute_tool(
         ToolExecutionRequest(tool_name="retail_sql", input={"question": "Generate SQL"}),
         ToolExecutionContext(user_role="analyst"),
+        registry=build_default_tool_registry(retail_sql_available=False),
     )
 
     assert result.status == ToolStatus.unavailable
     assert result.authorized is True
     assert result.error_code == "tool_unavailable"
     assert result.output == {}
+
+
+@pytest.mark.asyncio
+async def test_retail_sql_tool_returns_rows_without_raw_sql() -> None:
+    pipeline = FakeSQLPipeline(
+        SQLPipelineResult(
+            generated_sql=GeneratedSQL(sql="select id from orders", explanation="Read orders."),
+            validation=SQLValidationResult(
+                status=SQLSafetyStatus.valid,
+                normalized_sql="SELECT id FROM orders LIMIT 25",
+                approved_tables=["orders"],
+                row_limit=25,
+            ),
+            execution=SQLExecutionResult(execution_success=True, rows=[{"id": "order-1"}], row_count=1),
+            schema_match_confidence=0.82,
+        )
+    )
+
+    result = await authorize_and_execute_tool(
+        ToolExecutionRequest(tool_name="retail_sql", input={"question": "List orders", "limit": 25}),
+        ToolExecutionContext(user_role="analyst", sql_pipeline=pipeline),
+        registry=build_default_tool_registry(retail_sql_available=True),
+    )
+
+    assert result.status == ToolStatus.success
+    assert result.output["status"] == "success"
+    assert result.output["rows"] == [{"id": "order-1"}]
+    assert pipeline.calls == [("List orders", 25)]
+    assert "select id from orders" not in str(result.output).lower()
 
 
 @pytest.mark.asyncio

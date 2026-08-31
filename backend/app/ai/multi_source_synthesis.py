@@ -78,7 +78,10 @@ def synthesize_multi_source_answer(evidence: MultiSourceEvidence) -> str:
     if evidence.database_evidence:
         entities = evidence.database_evidence[:3]
         entity_names = ", ".join(item.entity for item in entities)
-        parts.append(f"Using {evidence.ranking_metric}, the weakest returned categories were {entity_names}.")
+        if any(item.metric_name == "retail_sql" for item in entities):
+            parts.append(f"Using {evidence.ranking_metric}, the strongest returned database rows were {entity_names}.")
+        else:
+            parts.append(f"Using {evidence.ranking_metric}, the weakest returned categories were {entity_names}.")
         for item in entities:
             match = next((candidate for candidate in evidence.matches if candidate.database_entity == item.entity), None)
             metric_text = _database_metric_text(item)
@@ -110,6 +113,22 @@ def synthesize_multi_source_answer(evidence: MultiSourceEvidence) -> str:
 
 def _database_evidence(tool_results: list[dict[str, Any]]) -> tuple[list[DatabaseEvidence], str]:
     analytics = next((item for item in tool_results if item.get("tool_name") == "analytics_summary"), None)
+    retail_sql = next((item for item in tool_results if item.get("tool_name") == "retail_sql"), None)
+    if retail_sql:
+        output = retail_sql.get("output") or {}
+        rows = output.get("rows")
+        if isinstance(rows, list):
+            return [
+                DatabaseEvidence(
+                    metric_name="retail_sql",
+                    entity=_entity_name(row),
+                    period="selected period",
+                    values=row,
+                    source="retail_sql",
+                )
+                for row in rows[:3]
+                if isinstance(row, dict)
+            ], "read-only retail database rows"
     if not analytics:
         return [], "available evidence"
 
@@ -178,6 +197,11 @@ def _entity_name(item: dict[str, Any]) -> str:
         or item.get("product_name")
         or item.get("supplier_name")
         or item.get("customer_name")
+        or item.get("segment")
+        or item.get("channel")
+        or item.get("city")
+        or item.get("state")
+        or item.get("name")
         or item.get("sku")
         or "unknown"
     )

@@ -75,6 +75,7 @@ def test_sql_guard_accepts_select_and_adds_row_limit() -> None:
         ("select * from ai_traces", "unapproved_table"),
         ("select pg_sleep(10) from orders", "unsafe_function"),
         ("select * from private.orders", "unapproved_schema"),
+        ("select id from orders -- leak", "comments_not_allowed"),
     ],
 )
 def test_sql_guard_blocks_unsafe_sql(sql: str, reason: str) -> None:
@@ -82,6 +83,23 @@ def test_sql_guard_blocks_unsafe_sql(sql: str, reason: str) -> None:
 
     assert result.status == SQLSafetyStatus.invalid
     assert result.reason == reason
+
+
+def test_sql_guard_allows_safe_joined_aggregation_and_caps_limit() -> None:
+    result = SQLGuard({"orders", "customers"}, row_limit=50).validate(
+        """
+        select c.segment, sum(o.total_cents) as revenue_cents
+        from orders o
+        join customers c on c.id = o.customer_id
+        group by c.segment
+        order by revenue_cents desc
+        limit 500
+        """
+    )
+
+    assert result.status == SQLSafetyStatus.valid
+    assert result.row_limit == 50
+    assert "LIMIT 50" in result.normalized_sql
 
 
 @pytest.mark.asyncio
@@ -95,6 +113,16 @@ async def test_pipeline_executes_valid_sql_and_returns_confidence_metadata() -> 
     assert result.execution.row_count == 1
     assert result.confidence_metadata["execution_success"] is True
     assert result.confidence_metadata["row_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_uses_requested_row_limit() -> None:
+    provider = FakeSQLProvider([GeneratedSQL(sql="select id from orders limit 500", explanation="Read orders.")])
+
+    result = await TextToSQLPipeline(provider, db=FakeDB()).run("Show orders", row_limit=25)
+
+    assert result.validation.row_limit == 25
+    assert "LIMIT 25" in result.validation.normalized_sql
 
 
 @pytest.mark.asyncio

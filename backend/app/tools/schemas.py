@@ -34,6 +34,7 @@ class ToolExecutionContext(BaseModel):
     trace: Any | None = None
     analytics_service: Any | None = None
     document_service: Any | None = None
+    sql_pipeline: Any | None = None
     document_source_ids: list[str] = Field(default_factory=list)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -48,13 +49,16 @@ class ToolExecutionResult(BaseModel):
     error_code: str | None = None
 
     def to_trace_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "tool_name": self.tool_name,
             "status": self.status.value,
             "latency_ms": self.latency_ms,
             "authorized": self.authorized,
             "error_code": self.error_code,
         }
+        if self.tool_name == ToolName.retail_sql.value and isinstance(self.output.get("internal_metadata"), dict):
+            metadata["internal_metadata"] = self.output["internal_metadata"]
+        return metadata
 
 
 class AnalyticsSummaryInput(BaseModel):
@@ -68,6 +72,22 @@ class AnalyticsSummaryOutput(BaseModel):
     summary_type: str
     question: str
     data: dict[str, Any]
+
+
+class RetailSQLInput(BaseModel):
+    question: str = Field(min_length=1, max_length=1_000)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class RetailSQLOutput(BaseModel):
+    question: str
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    row_count: int = 0
+    execution_success: bool = False
+    status: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    limitations: list[str] = Field(default_factory=list)
+    internal_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class DocumentSearchInput(BaseModel):

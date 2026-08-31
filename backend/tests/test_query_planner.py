@@ -25,6 +25,15 @@ def test_retail_analytics_uses_analytics_summary_not_retail_sql() -> None:
     assert all(step.tool_name != ToolName.retail_sql for step in plan.steps)
 
 
+def test_complex_retail_analytics_uses_retail_sql() -> None:
+    plan = QueryPlanner().create_plan(
+        "Show me a table of revenue by customer segment.",
+        _route(RouteCategory.retail_analytics, RouteReason.retail_metric),
+    )
+
+    assert plan.steps[0].tool_name == ToolName.retail_sql
+
+
 def test_multi_source_plan_is_bounded_and_uses_approved_tools() -> None:
     plan = QueryPlanner().create_plan(
         "Compare category revenue with the supplier report.",
@@ -34,6 +43,15 @@ def test_multi_source_plan_is_bounded_and_uses_approved_tools() -> None:
     assert len(plan.steps) <= 3
     assert [step.tool_name for step in plan.tool_steps] == [ToolName.analytics_summary, ToolName.document_search]
     assert plan.model_task == ModelTask.multi_source_synthesis
+
+
+def test_complex_multi_source_plan_can_use_retail_sql_with_documents() -> None:
+    plan = QueryPlanner().create_plan(
+        "Show me revenue by customer segment and compare it with the supplier report.",
+        _route(RouteCategory.multi_source, RouteReason.mixed_sources),
+    )
+
+    assert [step.tool_name for step in plan.tool_steps] == [ToolName.retail_sql, ToolName.document_search]
 
 
 def test_website_multi_source_plan_uses_website_search() -> None:
